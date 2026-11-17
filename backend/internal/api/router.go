@@ -17,6 +17,7 @@ import (
 
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
+	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
 )
 
@@ -26,6 +27,7 @@ type Deps struct {
 	Store       *store.Store
 	Auth        *auth.Service
 	Scanner     *scanner.Scanner
+	Stats       *stats.Service
 	ScanSecret  string
 	CORSOrigins []string
 	StaticDir   string
@@ -37,11 +39,12 @@ type handlers struct {
 	store      *store.Store
 	auth       *auth.Service
 	scanner    *scanner.Scanner
+	stats      *stats.Service
 	scanSecret string
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, scanner: d.Scanner, scanSecret: d.ScanSecret}
+	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, requestLogger(d.Log), middleware.Recoverer)
 
@@ -74,6 +77,14 @@ func NewRouter(d Deps) http.Handler {
 			r.Use(d.Auth.RequireUser)
 			r.Get("/me", d.Auth.Me)
 			r.Get("/scans/latest", h.latestScan)
+
+			r.Get("/overview", h.overview)
+			r.Get("/analytics", h.analytics)
+			r.Get("/repos", h.repos)
+			r.Get("/repos/{id:[0-9]+}", h.repo)
+			r.Get("/digest", h.digest)
+			r.Get("/settings", h.getSettings)
+			r.Put("/settings", h.putSettings)
 		})
 
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {

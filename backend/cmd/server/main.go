@@ -9,12 +9,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // distroless has no zoneinfo; user timezones need it
 
 	"github.com/harshit3011/gitpulse/backend/internal/api"
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/config"
 	"github.com/harshit3011/gitpulse/backend/internal/db"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
+	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
 )
 
@@ -71,7 +73,7 @@ func run() error {
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Store: st, Auth: authSvc, Scanner: scn, ScanSecret: cfg.ScanSecret,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
 			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
