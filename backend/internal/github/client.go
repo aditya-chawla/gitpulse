@@ -53,8 +53,8 @@ type Option func(*HTTPClient)
 func WithBaseURL(u string) Option {
 	return func(c *HTTPClient) { c.apiBase = u; c.graphqlURL = u + "/graphql" }
 }
-func WithCache(cache Cache) Option        { return func(c *HTTPClient) { c.cache = cache } }
-func WithLogger(l *slog.Logger) Option    { return func(c *HTTPClient) { c.log = l } }
+func WithCache(cache Cache) Option         { return func(c *HTTPClient) { c.cache = cache } }
+func WithLogger(l *slog.Logger) Option     { return func(c *HTTPClient) { c.log = l } }
 func WithHTTPClient(h *http.Client) Option { return func(c *HTTPClient) { c.http = h } }
 func withSleep(f func(context.Context, time.Duration) error) Option {
 	return func(c *HTTPClient) { c.sleep = f }
@@ -272,9 +272,9 @@ func (c *HTTPClient) restGet(ctx context.Context, path string) (int, []byte, err
 }
 
 type gqlError struct {
-	Type    string   `json:"type"`
-	Message string   `json:"message"`
-	Path    []any    `json:"path"`
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Path    []any  `json:"path"`
 }
 
 // GraphQLError carries errors returned in a GraphQL response body.

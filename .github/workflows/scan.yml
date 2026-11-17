@@ -1,0 +1,74 @@
+name: Daily scan
+
+# The free Render backend sleeps when idle, so scheduling lives here instead of
+# in the app. This wakes the backend, starts a scan, and polls until it ends
+# (polling also keeps the instance awake for the whole scan).
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # 02:17 UTC daily (07:47 IST). Off the hour to avoid peak queueing.
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: daily-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      API_URL: ${{ secrets.GITPULSE_API_URL }} # e.g. https://gitpulse-api.onrender.com
+      SCAN_SECRET: ${{ secrets.SCAN_SECRET }}
+    steps:
+      - name: Check configuration
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$SCAN_SECRET" ]; then
+            echo "::error::Set the GITPULSE_API_URL and SCAN_SECRET repository secrets."
+            exit 1
+          fi
+
+      - name: Wake the backend (cold start can take a minute or more)
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 60 "$API_URL/healthz" >/dev/null; then
+              echo "Backend is up (attempt $i)"; exit 0
+            fi
+            echo "Not up yet (attempt $i), retrying in 15s"; sleep 15
+          done
+          echo "::error::Backend did not respond within ~15 minutes"; exit 1
+
+      - name: Start scan
+        id: start
+        run: |
+          for i in $(seq 1 5); do
+            code=$(curl -sS --max-time 120 -o resp.json -w '%{http_code}' -X POST \
+              -H "X-Scan-Secret: $SCAN_SECRET" "$API_URL/api/scan" || echo 000)
+            if [ "$code" = "202" ]; then
+              cat resp.json; echo
+              echo "ids=$(jq -r '[.scans[].scanId] | join(" ")' resp.json)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $code $(cat resp.json 2>/dev/null)"
+            case "$code" in 401|409) exit 1 ;; esac   # bad secret / no users: retrying won't help
+            sleep 20
+          done
+          exit 1
+
+      - name: Wait for scan to finish
+        run: |
+          for id in ${{ steps.start.outputs.ids }}; do
+            for i in $(seq 1 100); do   # up to ~50 minutes
+              s=$(curl -sS --max-time 60 -H "X-Scan-Secret: $SCAN_SECRET" "$API_URL/api/scans/$id" || echo '{}')
+              status=$(echo "$s" | jq -r '.status // "unknown"')
+              echo "scan $id: $status $(echo "$s" | jq -r '"\(.phase // "") \(.reposDone // 0)/\(.reposTotal // 0)"')"
+              case "$status" in
+                succeeded) echo "$s" | jq -r '.error // empty'; break ;;
+                failed) echo "::error::Scan $id failed: $(echo "$s" | jq -r '.error')"; exit 1 ;;
+              esac
+              sleep 30
+            done
+            if [ "$status" != "succeeded" ]; then echo "::error::Scan $id did not finish in time"; exit 1; fi
+          done

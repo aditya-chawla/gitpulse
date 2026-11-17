@@ -60,7 +60,7 @@ func TestTestDetection(t *testing.T) {
 
 func TestStack(t *testing.T) {
 	contents := map[string]string{
-		"backend/go.mod": "module x\n\ngo 1.27\n\nrequire (\n\tgithub.com/go-chi/chi/v5 v5.5.0\n\tgithub.com/jackc/pgx/v5 v5.13.0 // indirect\n)\nrequire github.com/stretchr/testify v1.9.0\n",
+		"backend/go.mod":        "module x\n\ngo 1.27\n\nrequire (\n\tgithub.com/go-chi/chi/v5 v5.5.0\n\tgithub.com/jackc/pgx/v5 v5.13.0 // indirect\n)\nrequire github.com/stretchr/testify v1.9.0\n",
 		"frontend/package.json": `{"dependencies":{"react":"^19","recharts":"^3"},"devDependencies":{"vite":"^7","@storybook/react":"^9","react-dom":"^19"}}`,
 		"ml/requirements.txt":   "# deps\nnumpy==2.1\nscikit-learn>=1.5\n-r other.txt\nFastAPI[all]\n",
 		"rs/Cargo.toml":         "[dependencies]\ntokio = { version = \"1\" }\nserde_json = \"1\"\n",

@@ -27,7 +27,7 @@ type fakeGH struct {
 	sinceArg map[github.RepoRef]time.Time
 }
 
-func (f *fakeGH) Viewer(context.Context) (*github.Viewer, error)     { v := f.viewer; return &v, nil }
+func (f *fakeGH) Viewer(context.Context) (*github.Viewer, error)    { v := f.viewer; return &v, nil }
 func (f *fakeGH) OwnedRepos(context.Context) ([]github.Repo, error) { return f.repos, nil }
 func (f *fakeGH) Trees(_ context.Context, refs []github.RepoRef, _ int) (map[github.RepoRef][]github.TreeEntry, error) {
 	out := map[github.RepoRef][]github.TreeEntry{}
@@ -104,7 +104,7 @@ func TestScanEndToEnd(t *testing.T) {
 				OpenPRCount: 1, OpenPRs: []github.Item{{Number: 4, Title: "fix", Author: "friend", URL: "u",
 					ReviewRequests: []string{"me"}, CreatedAt: now.AddDate(0, 0, -40), UpdatedAt: now}},
 				OpenIssueCount: 1, OpenIssues: []github.Item{{Number: 5, Title: "bug", URL: "u", CreatedAt: now, UpdatedAt: now}},
-				Branches: []github.Branch{{Name: "main", LastCommitAt: ptr(now)}, {Name: "old", LastCommitAt: ptr(now.AddDate(-1, 0, 0))}},
+				Branches:         []github.Branch{{Name: "main", LastCommitAt: ptr(now)}, {Name: "old", LastCommitAt: ptr(now.AddDate(-1, 0, 0))}},
 				RecentStargazers: []github.Actor{{Login: "fan", At: now}}},
 			{ID: 11, Ref: fork, IsFork: true, Visibility: "public", CreatedAt: now.AddDate(-1, 0, 0), PushedAt: ptr(now.AddDate(-1, 0, 0))},
 		},

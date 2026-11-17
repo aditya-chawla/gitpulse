@@ -71,7 +71,7 @@ func date(y, m, d int) time.Time { return time.Date(y, time.Month(m), d, 12, 0, 
 func TestLanguageTrend(t *testing.T) {
 	p := date(2025, 3, 1)
 	spans := []RepoSpan{
-		{1, date(2023, 6, 1), &p}, // active 2023..2025
+		{1, date(2023, 6, 1), &p},  // active 2023..2025
 		{2, date(2025, 1, 1), nil}, // never pushed: 2025 only
 		{3, date(2024, 1, 1), &p},  // excluded
 	}

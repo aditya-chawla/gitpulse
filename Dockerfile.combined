@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+# Single-service fallback: the Go server also serves the built frontend
+# (STATIC_DIR), so frontend and API share an origin without a proxy.
+# Build from the repo root: docker build -f Dockerfile.combined .
+
+FROM node:24-alpine AS web
+WORKDIR /web
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+FROM golang:1.27-alpine AS api
+WORKDIR /src
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=api /out/server /server
+COPY --from=web /web/dist /web
+ENV STATIC_DIR=/web
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/server"]

@@ -115,16 +115,16 @@ func lastCommitTime(ctx context.Context, db *pgxpool.Pool, repoID int64) (*time.
 
 // repoResult is everything gathered for one repo in one scan.
 type repoResult struct {
-	Repo     github.Repo
-	Files    detect.Files
-	Tech     []detect.Tech
-	Weeks    []github.CommitWeek
-	Commits  []github.Commit
-	Runs     []github.WorkflowRun
-	Health   health.Result
-	Login    string // viewer login, for review-request/assignee flags
-	UserID   int64
-	ScanID   int64
+	Repo    github.Repo
+	Files   detect.Files
+	Tech    []detect.Tech
+	Weeks   []github.CommitWeek
+	Commits []github.Commit
+	Runs    []github.WorkflowRun
+	Health  health.Result
+	Login   string // viewer login, for review-request/assignee flags
+	UserID  int64
+	ScanID  int64
 }
 
 func contains(list []string, s string) bool { return slices.Contains(list, s) }

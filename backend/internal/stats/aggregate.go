@@ -157,15 +157,15 @@ func LanguageTrend(spans []RepoSpan, rows []RepoLanguage, included map[int64]boo
 }
 
 type CommitStats struct {
-	Total          int       `json:"total"`
-	ByWeekday      [7]int    `json:"byWeekday"` // Sunday..Saturday
-	ByHour         [24]int   `json:"byHour"`
+	Total          int        `json:"total"`
+	ByWeekday      [7]int     `json:"byWeekday"` // Sunday..Saturday
+	ByHour         [24]int    `json:"byHour"`
 	Heatmap        [7][24]int `json:"heatmap"` // [weekday][hour]
-	LongestStreak  Streak    `json:"longestStreak"`
-	CurrentStreak  int       `json:"currentStreak"`
-	ActiveDays     int       `json:"activeDays"`
-	BusiestWeekday int       `json:"busiestWeekday"`
-	BusiestHour    int       `json:"busiestHour"`
+	LongestStreak  Streak     `json:"longestStreak"`
+	CurrentStreak  int        `json:"currentStreak"`
+	ActiveDays     int        `json:"activeDays"`
+	BusiestWeekday int        `json:"busiestWeekday"`
+	BusiestHour    int        `json:"busiestHour"`
 }
 
 type Streak struct {
