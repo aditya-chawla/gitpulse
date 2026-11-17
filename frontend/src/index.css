@@ -1,0 +1,152 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens. Chart colours come from the validated reference palette
+ * (dataviz skill): categorical slots in fixed order, a blue sequential ramp,
+ * and reserved status colours. Light and dark are each selected, not flipped.
+ */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface-1: #fcfcfb;
+  --surface-2: #f3f3f0;
+  --border: rgba(11, 11, 11, 0.1);
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #6f6d68;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --accent: #2a78d6;
+  --accent-ink: #ffffff;
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
+  --series-other: #b5b3ab;
+
+  --seq-0: #f0efec;
+  --seq-1: #cde2fb;
+  --seq-2: #9ec5f4;
+  --seq-3: #5598e7;
+  --seq-4: #256abf;
+  --seq-5: #0d366b;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --status-neutral: #898781;
+  --good-text: #006300;
+  --meter-track: #e8e7e1;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface-1: #1a1a19;
+    --surface-2: #232322;
+    --border: rgba(255, 255, 255, 0.1);
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #9c9a93;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --accent: #3987e5;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #0ca30c;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+    --series-other: #5c5b57;
+    --seq-0: #262625;
+    --seq-1: #104281;
+    --seq-2: #1c5cab;
+    --seq-3: #2a78d6;
+    --seq-4: #5598e7;
+    --seq-5: #9ec5f4;
+    --good-text: #0ca30c;
+    --meter-track: #2c2c2a;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface-1: #1a1a19;
+  --surface-2: #232322;
+  --border: rgba(255, 255, 255, 0.1);
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #9c9a93;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --accent: #3987e5;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #0ca30c;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #5c5b57;
+  --seq-0: #262625;
+  --seq-1: #104281;
+  --seq-2: #1c5cab;
+  --seq-3: #2a78d6;
+  --seq-4: #5598e7;
+  --seq-5: #9ec5f4;
+  --good-text: #0ca30c;
+  --meter-track: #2c2c2a;
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--border);
+  --color-ink: var(--text-primary);
+  --color-ink-2: var(--text-secondary);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-good: var(--status-good);
+  --color-good-text: var(--good-text);
+  --color-warning: var(--status-warning);
+  --color-critical: var(--status-critical);
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html,
+body {
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Recharts: keep axes and grid recessive. */
+.recharts-cartesian-axis-tick-value {
+  fill: var(--text-muted);
+  font-size: 12px;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--grid);
+}
+.recharts-surface:focus,
+.recharts-wrapper:focus,
+.recharts-sector:focus,
+.recharts-rectangle:focus {
+  outline: none;
+}
