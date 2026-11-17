@@ -14,6 +14,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/config"
 	"github.com/harshit3011/gitpulse/backend/internal/db"
+	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
 )
 
@@ -60,10 +61,18 @@ func run() error {
 
 	go sweepSessions(ctx, st, log)
 
+	if n, err := scanner.RecoverStale(startCtx, pool); err != nil {
+		return err
+	} else if n > 0 {
+		log.Warn("marked interrupted scans as failed", "count", n)
+	}
+	scn := scanner.New(ctx, pool, st, authSvc, scanner.DefaultClientFactory(log), log)
+
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Auth: authSvc, CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Scanner: scn, ScanSecret: cfg.ScanSecret,
+			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -88,7 +97,11 @@ func run() error {
 	log.Info("shutting down")
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelShutdown()
-	return srv.Shutdown(shutdownCtx)
+	err = srv.Shutdown(shutdownCtx)
+	// ctx is cancelled, so running scans are stopping; let them record their
+	// final status before the pool closes.
+	scn.Wait(10 * time.Second)
+	return err
 }
 
 func sweepSessions(ctx context.Context, st *store.Store, log *slog.Logger) {

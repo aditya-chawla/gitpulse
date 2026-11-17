@@ -16,19 +16,34 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
+	"github.com/harshit3011/gitpulse/backend/internal/scanner"
+	"github.com/harshit3011/gitpulse/backend/internal/store"
 )
 
 type Deps struct {
 	Log         *slog.Logger
 	DB          *pgxpool.Pool
+	Store       *store.Store
 	Auth        *auth.Service
+	Scanner     *scanner.Scanner
+	ScanSecret  string
 	CORSOrigins []string
 	StaticDir   string
 }
 
+type handlers struct {
+	log        *slog.Logger
+	db         *pgxpool.Pool
+	store      *store.Store
+	auth       *auth.Service
+	scanner    *scanner.Scanner
+	scanSecret string
+}
+
 func NewRouter(d Deps) http.Handler {
+	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, scanner: d.Scanner, scanSecret: d.ScanSecret}
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, requestLogger(d.Log), middleware.Recoverer)
+	r.Use(middleware.RequestID, requestLogger(d.Log), middleware.Recoverer)
 
 	// Liveness: no dependencies, so Render's health check passes during a DB blip.
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -51,9 +66,14 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/auth/callback", d.Auth.Callback)
 		r.Post("/auth/logout", d.Auth.Logout)
 
+		// Secret-or-session endpoints authenticate inside the handler.
+		r.Post("/scan", h.startScan)
+		r.Get("/scans/{id:[0-9]+}", h.getScan)
+
 		r.Group(func(r chi.Router) {
 			r.Use(d.Auth.RequireUser)
 			r.Get("/me", d.Auth.Me)
+			r.Get("/scans/latest", h.latestScan)
 		})
 
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {

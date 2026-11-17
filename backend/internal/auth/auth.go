@@ -168,7 +168,7 @@ type ctxKey struct{}
 // with UserFrom.
 func (s *Service) RequireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u := s.userFromRequest(r)
+		u := s.CurrentUser(r)
 		if u == nil {
 			writeJSONError(w, http.StatusUnauthorized, "not signed in")
 			return
@@ -180,14 +180,14 @@ func (s *Service) RequireUser(next http.Handler) http.Handler {
 // OptionalUser attaches the user if a valid session exists.
 func (s *Service) OptionalUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if u := s.userFromRequest(r); u != nil {
+		if u := s.CurrentUser(r); u != nil {
 			r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, u))
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (s *Service) userFromRequest(r *http.Request) *store.User {
+func (s *Service) CurrentUser(r *http.Request) *store.User {
 	c, err := r.Cookie(SessionCookie)
 	if err != nil || c.Value == "" {
 		return nil
