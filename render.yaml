@@ -2,9 +2,10 @@
 # free static site (frontend). The static site forwards /api/* to the API with
 # a rewrite so the browser sees a single origin (first-party session cookie).
 #
-# BEFORE APPLYING: if Render gives the API a different hostname than
-# gitpulse-api.onrender.com (names are global), update the rewrite destination
-# below. Values marked `sync: false` are entered in the dashboard (see README).
+# Live hosts: API https://gitpulse-api-gcn3.onrender.com, site
+# https://gitpulse-aeo3.onrender.com. If the API host ever changes, update the
+# rewrite destination below. Values marked `sync: false` are entered in the
+# dashboard (see README).
 #
 # Fallback if the rewrite can't proxy POSTs/cookies: deploy Dockerfile.combined
 # as a single service instead (README → "Single-service fallback").
@@ -65,7 +66,7 @@ services:
       # Order matters: API first, then the SPA fallback.
       - type: rewrite
         source: /api/*
-        destination: https://gitpulse-api.onrender.com/api/*
+        destination: https://gitpulse-api-gcn3.onrender.com/api/*
       - type: rewrite
         source: /*
         destination: /index.html
