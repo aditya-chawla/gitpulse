@@ -26,9 +26,11 @@ services:
     envVars:
       - key: DATABASE_URL # Neon *direct* (non-pooled) connection string, sslmode=require
         sync: false
-      - key: GITHUB_CLIENT_ID
+      - key: GITHUB_CLIENT_ID # GitHub App client ID
         sync: false
-      - key: GITHUB_CLIENT_SECRET
+      - key: GITHUB_CLIENT_SECRET # GitHub App client secret
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY # base64 of the app's .pem private key
         sync: false
       - key: OAUTH_REDIRECT_URL # https://<frontend host>/api/auth/callback
         sync: false
@@ -36,8 +38,6 @@ services:
         sync: false
       - key: ALLOWED_USERS
         value: harshit3011
-      - key: TOKEN_ENC_KEY # base64 of 32 random bytes, generated once by Render
-        generateValue: true
       - key: SCAN_SECRET # copy this value into the GitHub Actions secret SCAN_SECRET
         generateValue: true
       - key: FRONTEND_URL # same origin as the API thanks to the rewrite

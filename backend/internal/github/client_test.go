@@ -161,7 +161,7 @@ func TestOwnedReposShrinksPageOnTimeout(t *testing.T) {
 			_, _ = w.Write([]byte(`{"errors":[{"message":"timedout","type":"TIMEOUT"}]}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"data":{"viewer":{"repositories":{"pageInfo":{"hasNextPage":false},"nodes":[
+		_, _ = w.Write([]byte(`{"data":{"user":{"repositories":{"pageInfo":{"hasNextPage":false},"nodes":[
 			{"databaseId":9,"id":"R_9","name":"r","owner":{"login":"me"},"visibility":"PUBLIC",
 			 "createdAt":"2024-01-01T00:00:00Z","licenseInfo":{"spdxId":"MIT"},
 			 "languages":{"edges":[{"size":100,"node":{"name":"Go"}}]},
@@ -170,7 +170,7 @@ func TestOwnedReposShrinksPageOnTimeout(t *testing.T) {
 			 "refs":{"totalCount":2,"nodes":[{"name":"main","target":{"committedDate":"2024-02-01T00:00:00Z"}}]}}
 		]}}}}`))
 	}))
-	repos, err := c.OwnedRepos(context.Background())
+	repos, err := c.OwnedRepos(context.Background(), "me")
 	if err != nil {
 		t.Fatal(err)
 	}

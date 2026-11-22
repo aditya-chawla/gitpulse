@@ -1,10 +1,23 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"strings"
+	"sync"
 	"testing"
 )
+
+var testKeyPEM = sync.OnceValue(func() []byte {
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)})
+})
 
 func setBase(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://x")
@@ -12,7 +25,7 @@ func setBase(t *testing.T) {
 	t.Setenv("GITHUB_CLIENT_SECRET", "secret")
 	t.Setenv("OAUTH_REDIRECT_URL", "http://localhost:8080/api/auth/callback")
 	t.Setenv("ALLOWED_USERS", " Harshit3011 , other ")
-	t.Setenv("TOKEN_ENC_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("GITHUB_APP_PRIVATE_KEY", base64.StdEncoding.EncodeToString(testKeyPEM()))
 	t.Setenv("SCAN_SECRET", strings.Repeat("s", 32))
 }
 
@@ -32,11 +45,23 @@ func TestLoadOK(t *testing.T) {
 	if !c.CookieSecure {
 		t.Error("cookies must default to Secure")
 	}
+	if c.GitHubAppKey == nil {
+		t.Error("app key not parsed")
+	}
+}
+
+func TestPrivateKeyAcceptsEscapedPEM(t *testing.T) {
+	setBase(t)
+	// Some dashboards only take one line: PEM with literal "\n" escapes.
+	t.Setenv("GITHUB_APP_PRIVATE_KEY", strings.ReplaceAll(string(testKeyPEM()), "\n", `\n`))
+	if c, err := Load(); err != nil || c.GitHubAppKey == nil {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestLoadRejectsBadValues(t *testing.T) {
 	setBase(t)
-	t.Setenv("TOKEN_ENC_KEY", "short")
+	t.Setenv("GITHUB_APP_PRIVATE_KEY", "not a key")
 	t.Setenv("SCAN_SECRET", "tiny")
 	t.Setenv("COOKIE_SECURE", "false")
 	t.Setenv("COOKIE_SAMESITE", "none")
@@ -44,7 +69,7 @@ func TestLoadRejectsBadValues(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"TOKEN_ENC_KEY", "SCAN_SECRET", "COOKIE_SAMESITE"} {
+	for _, want := range []string{"GITHUB_APP_PRIVATE_KEY", "SCAN_SECRET", "COOKIE_SAMESITE"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %s: %v", want, err)
 		}

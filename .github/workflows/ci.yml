@@ -44,7 +44,7 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -p 1 ./... # -p 1: DB tests share one database
       - name: Docker image builds
         run: docker build -q -t gitpulse-api:ci .
 

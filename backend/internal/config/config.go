@@ -2,23 +2,25 @@
 package config
 
 import (
-	"encoding/base64"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/harshit3011/gitpulse/backend/internal/github"
 )
 
 type Config struct {
 	Port               string
 	DatabaseURL        string
-	GitHubClientID     string
+	GitHubClientID     string // the GitHub App's client ID (also the JWT issuer)
 	GitHubClientSecret string
+	GitHubAppKey       *rsa.PrivateKey
 	OAuthRedirectURL   string
 	AllowedUsers       map[string]bool // lower-cased logins
-	TokenEncKey        []byte          // 32 bytes, AES-256
 	ScanSecret         string
 	FrontendURL        string   // where the browser lands after login/logout
 	CORSOrigins        []string // extra origins allowed to call the API with credentials
@@ -66,12 +68,12 @@ func Load() (*Config, error) {
 		}
 	}
 
-	if key := req("TOKEN_ENC_KEY"); key != "" {
-		b, err := base64.StdEncoding.DecodeString(key)
-		if err != nil || len(b) != 32 {
-			errs = append(errs, errors.New("TOKEN_ENC_KEY must be base64 of exactly 32 bytes"))
+	if key := req("GITHUB_APP_PRIVATE_KEY"); key != "" {
+		k, err := github.ParsePrivateKey(key)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("GITHUB_APP_PRIVATE_KEY: %w", err))
 		}
-		c.TokenEncKey = b
+		c.GitHubAppKey = k
 	}
 	if c.ScanSecret != "" && len(c.ScanSecret) < 24 {
 		errs = append(errs, errors.New("SCAN_SECRET must be at least 24 characters"))

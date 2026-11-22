@@ -26,8 +26,12 @@ const (
 	callTimeout  = 30 * time.Second
 )
 
+// TokenFunc supplies the bearer token per request, so installation tokens can
+// be refreshed mid-scan.
+type TokenFunc func(ctx context.Context) (string, error)
+
 type HTTPClient struct {
-	token      string
+	token      TokenFunc
 	apiBase    string
 	graphqlURL string
 	http       *http.Client
@@ -60,7 +64,12 @@ func withSleep(f func(context.Context, time.Duration) error) Option {
 	return func(c *HTTPClient) { c.sleep = f }
 }
 
+// New builds a client with a fixed token (tests, scripts).
 func New(token string, opts ...Option) *HTTPClient {
+	return NewWithTokenFunc(func(context.Context) (string, error) { return token, nil }, opts...)
+}
+
+func NewWithTokenFunc(token TokenFunc, opts ...Option) *HTTPClient {
 	c := &HTTPClient{
 		token:      token,
 		apiBase:    "https://api.github.com",
@@ -182,6 +191,9 @@ func (c *HTTPClient) do(ctx context.Context, method, url string, body []byte, hd
 			return 0, nil, nil, ctx.Err()
 		}
 		var wait time.Duration
+		if errors.Is(err, ErrNotInstalled) {
+			return 0, nil, nil, err
+		}
 		if err != nil {
 			lastErr = err // network error or per-attempt timeout
 			wait = time.Duration(1<<attempt) * time.Second
@@ -216,7 +228,11 @@ func (c *HTTPClient) once(ctx context.Context, method, url string, body []byte, 
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	tok, err := c.token(ctx)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("github token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 )
 
@@ -21,14 +20,17 @@ func fakeGitHub(t *testing.T, login string) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_verification_code"})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "gho_x", "scope": "read:user,repo"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "ghu_x"})
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer gho_x" {
+		if r.Header.Get("Authorization") != "Bearer ghu_x" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 7, "node_id": "U_7", "login": login})
+	})
+	mux.HandleFunc("DELETE /applications/cid/token", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -41,7 +43,7 @@ func newTestService(gh *httptest.Server) *Service {
 		AllowedUsers: map[string]bool{"harshit3011": true}, FrontendURL: "http://localhost:5173",
 		AuthorizeURL: gh.URL + "/login/oauth/authorize", TokenURL: gh.URL + "/login/oauth/access_token",
 		APIBaseURL: gh.URL,
-	}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestLoginSetsStateAndRedirects(t *testing.T) {
@@ -65,8 +67,12 @@ func TestLoginSetsStateAndRedirects(t *testing.T) {
 	if state == "" || loc.Query().Get("state") != state {
 		t.Fatalf("state not bound: cookie=%q url=%q", state, loc.Query().Get("state"))
 	}
-	if !strings.Contains(loc.Query().Get("scope"), "repo") {
-		t.Errorf("scope = %q", loc.Query().Get("scope"))
+	// GitHub Apps ignore scopes; permissions come from the app settings.
+	if loc.Query().Has("scope") {
+		t.Errorf("unexpected scope param %q", loc.Query().Get("scope"))
+	}
+	if loc.Query().Get("client_id") != "cid" {
+		t.Errorf("client_id = %q", loc.Query().Get("client_id"))
 	}
 }
 

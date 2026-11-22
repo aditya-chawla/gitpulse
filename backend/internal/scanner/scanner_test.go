@@ -27,8 +27,10 @@ type fakeGH struct {
 	sinceArg map[github.RepoRef]time.Time
 }
 
-func (f *fakeGH) Viewer(context.Context) (*github.Viewer, error)    { v := f.viewer; return &v, nil }
-func (f *fakeGH) OwnedRepos(context.Context) ([]github.Repo, error) { return f.repos, nil }
+func (f *fakeGH) User(context.Context, string) (*github.Viewer, error) { v := f.viewer; return &v, nil }
+func (f *fakeGH) OwnedRepos(context.Context, string) ([]github.Repo, error) {
+	return f.repos, nil
+}
 func (f *fakeGH) Trees(_ context.Context, refs []github.RepoRef, _ int) (map[github.RepoRef][]github.TreeEntry, error) {
 	out := map[github.RepoRef][]github.TreeEntry{}
 	for _, r := range refs {
@@ -59,10 +61,6 @@ func (f *fakeGH) FailedRuns(context.Context, github.RepoRef, time.Time) ([]githu
 }
 func (f *fakeGH) Rate() github.RateInfo { return github.RateInfo{Calls: 7, GraphQLRemaining: 4990} }
 
-type plainTokens struct{}
-
-func (plainTokens) AccessToken(*store.User) (string, error) { return "tok", nil }
-
 func testDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
@@ -89,7 +87,7 @@ func TestScanEndToEnd(t *testing.T) {
 	pool := testDB(t)
 	ctx := context.Background()
 	st := store.New(pool)
-	if err := st.UpsertUser(ctx, store.User{ID: 1, NodeID: "U_1", Login: "me", TokenCiphertext: []byte{1}, TokenNonce: []byte{1}}); err != nil {
+	if err := st.UpsertUser(ctx, store.User{ID: 1, NodeID: "U_1", Login: "me"}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
@@ -104,8 +102,8 @@ func TestScanEndToEnd(t *testing.T) {
 				OpenPRCount: 1, OpenPRs: []github.Item{{Number: 4, Title: "fix", Author: "friend", URL: "u",
 					ReviewRequests: []string{"me"}, CreatedAt: now.AddDate(0, 0, -40), UpdatedAt: now}},
 				OpenIssueCount: 1, OpenIssues: []github.Item{{Number: 5, Title: "bug", URL: "u", CreatedAt: now, UpdatedAt: now}},
-				Branches:         []github.Branch{{Name: "main", LastCommitAt: ptr(now)}, {Name: "old", LastCommitAt: ptr(now.AddDate(-1, 0, 0))}},
-				RecentStargazers: []github.Actor{{Login: "fan", At: now}}},
+				Branches:    []github.Branch{{Name: "main", LastCommitAt: ptr(now)}, {Name: "old", LastCommitAt: ptr(now.AddDate(-1, 0, 0))}},
+				RecentForks: []github.Actor{{Login: "fan", At: now}}},
 			{ID: 11, Ref: fork, IsFork: true, Visibility: "public", CreatedAt: now.AddDate(-1, 0, 0), PushedAt: ptr(now.AddDate(-1, 0, 0))},
 		},
 		trees: map[github.RepoRef][]github.TreeEntry{app: {
@@ -118,7 +116,7 @@ func TestScanEndToEnd(t *testing.T) {
 		runs:     []github.WorkflowRun{{ID: 99, Name: "ci", Conclusion: "failure", URL: "u", CreatedAt: now}},
 		sinceArg: map[github.RepoRef]time.Time{},
 	}
-	s := New(ctx, pool, st, plainTokens{}, func(string, github.Cache) github.Client { return fake },
+	s := New(ctx, pool, st, func(context.Context, *store.User, github.Cache) (github.Client, error) { return fake, nil },
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.now = func() time.Time { return now }
 
@@ -174,7 +172,7 @@ func TestScanEndToEnd(t *testing.T) {
 	}
 
 	// Second scan: commits are fetched incrementally and deduplicated;
-	// stargazer events are not duplicated.
+	// fork events are not duplicated.
 	second := runScan()
 	if got := fake.sinceArg[app]; !got.Equal(now.AddDate(0, 0, -10)) {
 		t.Errorf("incremental since = %v, want last commit - 7d", got)
@@ -192,7 +190,7 @@ func TestConcurrentStartReturnsExisting(t *testing.T) {
 	pool := testDB(t)
 	ctx := context.Background()
 	st := store.New(pool)
-	_ = st.UpsertUser(ctx, store.User{ID: 2, NodeID: "U_2", Login: "me", TokenCiphertext: []byte{1}, TokenNonce: []byte{1}})
+	_ = st.UpsertUser(ctx, store.User{ID: 2, NodeID: "U_2", Login: "me"})
 	a, existA, err := insertScan(ctx, pool, 2, "ui")
 	if err != nil || existA {
 		t.Fatal(err)

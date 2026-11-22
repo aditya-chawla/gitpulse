@@ -11,23 +11,29 @@ import (
 	"time"
 )
 
-func (c *HTTPClient) Viewer(ctx context.Context) (*Viewer, error) {
+// User looks a user up by node ID. Installation tokens have no "viewer", and
+// the node ID (unlike the login) never changes.
+func (c *HTTPClient) User(ctx context.Context, nodeID string) (*Viewer, error) {
 	var out struct {
-		Viewer struct {
+		Node *struct {
 			DatabaseID int64  `json:"databaseId"`
 			ID         string `json:"id"`
 			Login      string `json:"login"`
-		} `json:"viewer"`
+		} `json:"node"`
 	}
-	if err := c.graphql(ctx, `query { viewer { databaseId id login } }`, nil, &out); err != nil {
+	q := `query($id: ID!) { node(id: $id) { ... on User { databaseId id login } } }`
+	if err := c.graphql(ctx, q, map[string]any{"id": nodeID}, &out); err != nil {
 		return nil, err
 	}
-	return &Viewer{ID: out.Viewer.DatabaseID, NodeID: out.Viewer.ID, Login: out.Viewer.Login}, nil
+	if out.Node == nil || out.Node.DatabaseID == 0 {
+		return nil, fmt.Errorf("user %s not found", nodeID)
+	}
+	return &Viewer{ID: out.Node.DatabaseID, NodeID: out.Node.ID, Login: out.Node.Login}, nil
 }
 
 const ownedReposQuery = `
-query($n: Int!, $after: String) {
-  viewer {
+query($login: String!, $n: Int!, $after: String) {
+  user(login: $login) {
     repositories(first: $n, after: $after, ownerAffiliations: [OWNER], orderBy: {field: PUSHED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -53,7 +59,6 @@ query($n: Int!, $after: String) {
           totalCount
           nodes { name target { ... on Commit { committedDate } } }
         }
-        stargazers(first: 20, orderBy: {field: STARRED_AT, direction: DESC}) { edges { starredAt node { login } } }
         forks(first: 20, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { createdAt owner { login } } }
       }
     }
@@ -125,12 +130,6 @@ type gqlRepo struct {
 			} `json:"target"`
 		} `json:"nodes"`
 	} `json:"refs"`
-	Stargazers struct {
-		Edges []struct {
-			StarredAt time.Time `json:"starredAt"`
-			Node      login     `json:"node"`
-		} `json:"edges"`
-	} `json:"stargazers"`
 	Forks struct {
 		Nodes []struct {
 			CreatedAt time.Time `json:"createdAt"`
@@ -204,9 +203,6 @@ func (g *gqlRepo) toRepo() Repo {
 	for _, b := range g.Refs.Nodes {
 		r.Branches = append(r.Branches, Branch{Name: b.Name, LastCommitAt: b.Target.CommittedDate})
 	}
-	for _, s := range g.Stargazers.Edges {
-		r.RecentStargazers = append(r.RecentStargazers, Actor{Login: s.Node.Login, At: s.StarredAt})
-	}
 	for _, f := range g.Forks.Nodes {
 		r.RecentForks = append(r.RecentForks, Actor{Login: f.Owner.Login, At: f.CreatedAt})
 	}
@@ -224,7 +220,7 @@ func shrinkable(err error) bool {
 	return errors.As(err, &ge)
 }
 
-func (c *HTTPClient) OwnedRepos(ctx context.Context) ([]Repo, error) {
+func (c *HTTPClient) OwnedRepos(ctx context.Context, login string) ([]Repo, error) {
 	var (
 		repos []Repo
 		after *string
@@ -232,7 +228,7 @@ func (c *HTTPClient) OwnedRepos(ctx context.Context) ([]Repo, error) {
 	)
 	for page := 0; page < 100; page++ {
 		var out struct {
-			Viewer struct {
+			User *struct {
 				Repositories struct {
 					PageInfo struct {
 						HasNextPage bool   `json:"hasNextPage"`
@@ -240,9 +236,9 @@ func (c *HTTPClient) OwnedRepos(ctx context.Context) ([]Repo, error) {
 					} `json:"pageInfo"`
 					Nodes []gqlRepo `json:"nodes"`
 				} `json:"repositories"`
-			} `json:"viewer"`
+			} `json:"user"`
 		}
-		err := c.graphql(ctx, ownedReposQuery, map[string]any{"n": size, "after": after}, &out)
+		err := c.graphql(ctx, ownedReposQuery, map[string]any{"login": login, "n": size, "after": after}, &out)
 		if err != nil {
 			if size > 1 && shrinkable(err) {
 				size /= 2
@@ -251,10 +247,13 @@ func (c *HTTPClient) OwnedRepos(ctx context.Context) ([]Repo, error) {
 			}
 			return nil, fmt.Errorf("list repos: %w", err)
 		}
-		for i := range out.Viewer.Repositories.Nodes {
-			repos = append(repos, out.Viewer.Repositories.Nodes[i].toRepo())
+		if out.User == nil {
+			return nil, fmt.Errorf("list repos: user %s not found", login)
 		}
-		pi := out.Viewer.Repositories.PageInfo
+		for i := range out.User.Repositories.Nodes {
+			repos = append(repos, out.User.Repositories.Nodes[i].toRepo())
+		}
+		pi := out.User.Repositories.PageInfo
 		if !pi.HasNextPage {
 			return repos, nil
 		}

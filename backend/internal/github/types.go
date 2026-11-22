@@ -8,10 +8,13 @@ import (
 )
 
 type Client interface {
-	Viewer(ctx context.Context) (*Viewer, error)
-	// OwnedRepos lists every repo the viewer owns, with metadata, languages,
-	// topics, open PRs/issues, branches, and recent stargazers/forks.
-	OwnedRepos(ctx context.Context) ([]Repo, error)
+	// User resolves a user by node ID (stable across renames).
+	User(ctx context.Context, nodeID string) (*Viewer, error)
+	// OwnedRepos lists every repo the user owns that the token can see, with
+	// metadata, languages, topics, open PRs/issues, branches, and recent
+	// forks. (Stargazer lists are not readable with installation tokens, so
+	// only star counts are collected.)
+	OwnedRepos(ctx context.Context, login string) ([]Repo, error)
 	// Trees returns each repo's file tree at HEAD down to `depth` levels.
 	// Empty repos are absent from the map.
 	Trees(ctx context.Context, repos []RepoRef, depth int) (map[RepoRef][]TreeEntry, error)
@@ -70,8 +73,7 @@ type Repo struct {
 	Branches          []Branch
 	BranchesTruncated bool
 
-	RecentStargazers []Actor
-	RecentForks      []Actor
+	RecentForks []Actor
 }
 
 type LanguageBytes struct {

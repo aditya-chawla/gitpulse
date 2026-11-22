@@ -33,16 +33,13 @@ const (
 
 var ErrUnknownUser = errors.New("unknown user")
 
-type ClientFactory func(token string, cache github.Cache) github.Client
-
-type TokenSource interface {
-	AccessToken(u *store.User) (string, error)
-}
+// ClientFactory returns a read-only GitHub client for the user, wired to the
+// scanner's ETag cache.
+type ClientFactory func(ctx context.Context, u *store.User, cache github.Cache) (github.Client, error)
 
 type Scanner struct {
 	db        *pgxpool.Pool
 	store     *store.Store
-	tokens    TokenSource
 	newClient ClientFactory
 	log       *slog.Logger
 	now       func() time.Time
@@ -53,15 +50,8 @@ type Scanner struct {
 
 // New creates a scanner. Scans run under baseCtx, so cancelling it (server
 // shutdown) stops them.
-func New(baseCtx context.Context, db *pgxpool.Pool, st *store.Store, tokens TokenSource, f ClientFactory, log *slog.Logger) *Scanner {
-	return &Scanner{db: db, store: st, tokens: tokens, newClient: f, log: log, now: time.Now, baseCtx: baseCtx}
-}
-
-// DefaultClientFactory builds the real HTTP client.
-func DefaultClientFactory(log *slog.Logger) ClientFactory {
-	return func(token string, cache github.Cache) github.Client {
-		return github.New(token, github.WithCache(cache), github.WithLogger(log))
-	}
+func New(baseCtx context.Context, db *pgxpool.Pool, st *store.Store, f ClientFactory, log *slog.Logger) *Scanner {
+	return &Scanner{db: db, store: st, newClient: f, log: log, now: time.Now, baseCtx: baseCtx}
 }
 
 // Start begins a background scan for the user. If one is already running its
@@ -110,11 +100,11 @@ func (s *Scanner) run(scanID int64, u *store.User) {
 				err = fmt.Errorf("panic: %v", r)
 			}
 		}()
-		token, err := s.tokens.AccessToken(u)
+		c, err := s.newClient(ctx, u, dbCache{db: s.db, userID: u.ID})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("github access: %w", err)
 		}
-		client = s.newClient(token, dbCache{db: s.db, userID: u.ID})
+		client = c
 		return s.scan(ctx, scanID, u, client, log)
 	}()
 
@@ -159,18 +149,18 @@ func first(s []string, n int) []string {
 // scan does the work. Repo-level problems become warnings; only failures that
 // make the whole snapshot meaningless return an error.
 func (s *Scanner) scan(ctx context.Context, scanID int64, u *store.User, gh github.Client, log *slog.Logger) ([]string, error) {
-	viewer, err := gh.Viewer(ctx)
+	viewer, err := gh.User(ctx, u.NodeID)
 	if err != nil {
-		return nil, fmt.Errorf("verify token: %w", err)
+		return nil, fmt.Errorf("look up user: %w", err)
 	}
 	if viewer.ID != u.ID {
-		return nil, fmt.Errorf("token belongs to user %d, expected %d", viewer.ID, u.ID)
+		return nil, fmt.Errorf("node %s belongs to user %d, expected %d", u.NodeID, viewer.ID, u.ID)
 	}
 
 	if err := setPhase(ctx, s.db, scanID, "listing repositories", 0); err != nil {
 		return nil, err
 	}
-	repos, err := gh.OwnedRepos(ctx)
+	repos, err := gh.OwnedRepos(ctx, viewer.Login)
 	if err != nil {
 		return nil, err
 	}

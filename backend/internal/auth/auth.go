@@ -1,5 +1,7 @@
-// Package auth implements GitHub OAuth sign-in, the username allowlist, and
-// cookie sessions.
+// Package auth implements "Sign in with GitHub" through the GitHub App's
+// user authorization flow, the username allowlist, and cookie sessions. The
+// user token is used once to learn who signed in, then revoked; GitHub API
+// access goes through installation tokens (package install).
 package auth
 
 import (
@@ -11,10 +13,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
 )
 
@@ -22,9 +24,6 @@ const (
 	SessionCookie = "gitpulse_session"
 	stateCookie   = "gitpulse_oauth_state"
 	sessionTTL    = 30 * 24 * time.Hour
-	// repo: private repo metadata, contents (manifests) and Actions runs.
-	// OAuth apps have no read-only private-repo scope.
-	oauthScopes = "read:user repo"
 )
 
 type Config struct {
@@ -39,14 +38,13 @@ type Config struct {
 }
 
 type Service struct {
-	cfg    Config
-	store  *store.Store
-	sealer *Sealer
-	http   *http.Client
-	log    *slog.Logger
+	cfg   Config
+	store *store.Store
+	http  *http.Client
+	log   *slog.Logger
 }
 
-func NewService(cfg Config, st *store.Store, sealer *Sealer, log *slog.Logger) *Service {
+func NewService(cfg Config, st *store.Store, log *slog.Logger) *Service {
 	if cfg.AuthorizeURL == "" {
 		cfg.AuthorizeURL = "https://github.com/login/oauth/authorize"
 	}
@@ -56,7 +54,7 @@ func NewService(cfg Config, st *store.Store, sealer *Sealer, log *slog.Logger) *
 	if cfg.APIBaseURL == "" {
 		cfg.APIBaseURL = "https://api.github.com"
 	}
-	return &Service{cfg: cfg, store: st, sealer: sealer, http: &http.Client{Timeout: 15 * time.Second}, log: log}
+	return &Service{cfg: cfg, store: st, http: &http.Client{Timeout: 15 * time.Second}, log: log}
 }
 
 func (s *Service) Allowed(login string) bool { return s.cfg.AllowedUsers[strings.ToLower(login)] }
@@ -75,15 +73,14 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 	q := url.Values{
 		"client_id":    {s.cfg.ClientID},
 		"redirect_uri": {s.cfg.RedirectURL},
-		"scope":        {oauthScopes},
 		"state":        {state},
 		"allow_signup": {"false"},
 	}
 	http.Redirect(w, r, s.cfg.AuthorizeURL+"?"+q.Encode(), http.StatusFound)
 }
 
-// Callback exchanges the code, checks the allowlist, stores the encrypted
-// token, and starts a session.
+// Callback exchanges the code, identifies the user, revokes the token, checks
+// the allowlist, and starts a session.
 func (s *Service) Callback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	c, err := r.Cookie(stateCookie)
@@ -98,12 +95,13 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "denied", fmt.Errorf("github returned error: %s", e))
 		return
 	}
-	token, scopes, err := s.exchange(ctx, r.URL.Query().Get("code"))
+	token, err := s.exchange(ctx, r.URL.Query().Get("code"))
 	if err != nil {
 		s.fail(w, r, "exchange_failed", err)
 		return
 	}
 	gu, err := s.fetchUser(ctx, token)
+	s.revoke(token)
 	if err != nil {
 		s.fail(w, r, "user_fetch_failed", err)
 		return
@@ -114,15 +112,8 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	aad := []byte(strconv.FormatInt(gu.ID, 10))
-	ct, nonce, err := s.sealer.Seal([]byte(token), aad)
-	if err != nil {
-		s.fail(w, r, "internal", err)
-		return
-	}
 	if err := s.store.UpsertUser(ctx, store.User{
 		ID: gu.ID, NodeID: gu.NodeID, Login: gu.Login, Name: gu.Name, AvatarURL: gu.AvatarURL,
-		TokenCiphertext: ct, TokenNonce: nonce, TokenScopes: scopes,
 	}); err != nil {
 		s.fail(w, r, "internal", err)
 		return
@@ -212,15 +203,6 @@ func UserFrom(ctx context.Context) *store.User {
 	return u
 }
 
-// AccessToken decrypts a user's stored GitHub token.
-func (s *Service) AccessToken(u *store.User) (string, error) {
-	pt, err := s.sealer.Open(u.TokenCiphertext, u.TokenNonce, []byte(strconv.FormatInt(u.ID, 10)))
-	if err != nil {
-		return "", fmt.Errorf("decrypt token for user %d: %w", u.ID, err)
-	}
-	return string(pt), nil
-}
-
 // Me returns the signed-in user's public profile.
 func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 	u := UserFrom(r.Context())
@@ -251,9 +233,9 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 
 // --- GitHub calls needed only for sign-in ---
 
-func (s *Service) exchange(ctx context.Context, code string) (token, scopes string, err error) {
+func (s *Service) exchange(ctx context.Context, code string) (string, error) {
 	if code == "" {
-		return "", "", errors.New("missing code")
+		return "", errors.New("missing code")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -266,22 +248,35 @@ func (s *Service) exchange(ctx context.Context, code string) (token, scopes stri
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	defer resp.Body.Close()
 	var body struct {
 		AccessToken string `json:"access_token"`
-		Scope       string `json:"scope"`
 		Error       string `json:"error"`
 		ErrorDesc   string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", "", fmt.Errorf("decode token response (status %d): %w", resp.StatusCode, err)
+		return "", fmt.Errorf("decode token response (status %d): %w", resp.StatusCode, err)
 	}
 	if body.Error != "" || body.AccessToken == "" {
-		return "", "", fmt.Errorf("token exchange: %s %s", body.Error, body.ErrorDesc)
+		return "", fmt.Errorf("token exchange: %s %s", body.Error, body.ErrorDesc)
 	}
-	return body.AccessToken, body.Scope, nil
+	return body.AccessToken, nil
+}
+
+// revoke deletes the user token in the background; it is no longer needed.
+// Failure is harmless (the token expires after 8 hours) but logged.
+func (s *Service) revoke(token string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := github.RevokeUserToken(ctx, s.cfg.APIBaseURL, s.cfg.ClientID, s.cfg.ClientSecret, token); err != nil {
+			s.log.Warn("revoke user token", "err", err)
+			return
+		}
+		s.log.Info("user token revoked")
+	}()
 }
 
 type githubUser struct {

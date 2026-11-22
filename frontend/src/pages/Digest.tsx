@@ -24,7 +24,8 @@ export default function DigestPage() {
         <Count label="Waiting on you" n={d.waitingOnMe.length} />
         <Count label="New issues" n={d.newIssues.length} />
         <Count label="Failed runs" n={d.failedRuns.length} />
-        <Count label="New stars" n={d.newStars.length} />
+        {/* GitHub doesn't let apps list stargazers, so stars come from per-repo count changes. */}
+        <Count label="New stars" n={d.deltas.reduce((n, c) => n + Math.max(0, c.stars), 0)} />
         <Count label="New forks" n={d.newForks.length} />
       </div>
 
@@ -62,7 +63,7 @@ export default function DigestPage() {
       </div>
 
       <div className="grid gap-5 lg:grid-cols-2">
-        <Section title="New stars and forks">
+        <Section title="New forks and stars" hint="Who forked. Stargazer names aren't available to GitHub Apps; star counts are alongside">
           {d.newStars.length + d.newForks.length ? (
             <ul className="divide-y divide-line text-[13px]">
               {[...d.newStars.map((s) => ({ ...s, kind: '★ starred' })), ...d.newForks.map((s) => ({ ...s, kind: '⑂ forked' }))]
@@ -73,7 +74,7 @@ export default function DigestPage() {
                     meta={ago(e.at)} />
                 ))}
             </ul>
-          ) : <Empty>No new stars or forks.</Empty>}
+          ) : <Empty>No new forks.</Empty>}
         </Section>
         <Section title="Star and fork changes" hint="Net change per repo since the previous scan">
           {!d.sincePrevScan ? <Empty>Available after the next scan.</Empty> : d.deltas.length ? (

@@ -15,6 +15,8 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/config"
 	"github.com/harshit3011/gitpulse/backend/internal/db"
+	"github.com/harshit3011/gitpulse/backend/internal/github"
+	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
@@ -51,15 +53,12 @@ func run() error {
 	defer pool.Close()
 
 	st := store.New(pool)
-	sealer, err := auth.NewSealer(cfg.TokenEncKey)
-	if err != nil {
-		return err
-	}
 	authSvc := auth.NewService(auth.Config{
 		ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret,
 		RedirectURL: cfg.OAuthRedirectURL, AllowedUsers: cfg.AllowedUsers,
 		FrontendURL: cfg.FrontendURL, CookieSecure: cfg.CookieSecure, CookieSameSite: cfg.CookieSameSite,
-	}, st, sealer, log)
+	}, st, log)
+	installs := install.New(github.NewApp(cfg.GitHubClientID, cfg.GitHubAppKey), pool, log)
 
 	go sweepSessions(ctx, st, log)
 
@@ -68,12 +67,14 @@ func run() error {
 	} else if n > 0 {
 		log.Warn("marked interrupted scans as failed", "count", n)
 	}
-	scn := scanner.New(ctx, pool, st, authSvc, scanner.DefaultClientFactory(log), log)
+	scn := scanner.New(ctx, pool, st, func(ctx context.Context, u *store.User, cache github.Cache) (github.Client, error) {
+		return installs.ReadClient(ctx, u, github.WithCache(cache), github.WithLogger(log))
+	}, log)
 
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Store: st, Auth: authSvc, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
 			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,

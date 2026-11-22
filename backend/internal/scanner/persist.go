@@ -236,7 +236,7 @@ func writeRepo(ctx context.Context, db *pgxpool.Pool, r *repoResult) error {
 			}
 		}
 
-		for kind, actors := range map[string][]github.Actor{"star": g.RecentStargazers, "fork": g.RecentForks} {
+		for kind, actors := range map[string][]github.Actor{"fork": g.RecentForks} {
 			for _, a := range actors {
 				if a.Login == "" {
 					continue

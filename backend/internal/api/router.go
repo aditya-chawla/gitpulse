@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
+	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
@@ -26,6 +27,7 @@ type Deps struct {
 	DB          *pgxpool.Pool
 	Store       *store.Store
 	Auth        *auth.Service
+	Install     *install.Service
 	Scanner     *scanner.Scanner
 	Stats       *stats.Service
 	ScanSecret  string
@@ -38,13 +40,14 @@ type handlers struct {
 	db         *pgxpool.Pool
 	store      *store.Store
 	auth       *auth.Service
+	install    *install.Service
 	scanner    *scanner.Scanner
 	stats      *stats.Service
 	scanSecret string
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
+	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, requestLogger(d.Log), middleware.Recoverer)
 
@@ -85,6 +88,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/digest", h.digest)
 			r.Get("/settings", h.getSettings)
 			r.Put("/settings", h.putSettings)
+
+			r.Get("/app", h.appStatus)
+			r.Get("/repo-settings", h.listRepoSettings)
+			r.Put("/repo-settings/{id:[0-9]+}", h.putRepoSetting)
 		})
 
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {

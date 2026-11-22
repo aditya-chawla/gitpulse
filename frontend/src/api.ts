@@ -239,6 +239,30 @@ export interface Settings {
   timezone: string
 }
 
+export interface AppStatus {
+  installed: boolean
+  appName?: string
+  installUrl?: string
+  configureUrl?: string
+  installationId?: number
+  repositorySelection?: 'all' | 'selected'
+  suspended?: boolean
+  /** Read permissions scans need but the installation lacks, e.g. "contents:read". */
+  missingPermissions?: string[]
+}
+
+export type PRMode = 'off' | 'dashboard' | 'comment'
+
+export interface RepoSetting {
+  repoId: number
+  fullName: string
+  visibility: string
+  isArchived: boolean
+  isFork: boolean
+  prMode: PRMode
+  releasesEnabled: boolean
+}
+
 export interface ReposResponse {
   scan: ScanRef
   repos: RepoRow[]

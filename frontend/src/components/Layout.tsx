@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet } from 'react-router'
-import { api, ApiError, type Me, type Scan } from '../api'
-import { useData } from '../data'
+import { api, ApiError, type AppStatus, type Me, type Scan } from '../api'
+import { useApi, useData } from '../data'
 import { ago } from '../format'
 
 const nav = [
@@ -36,8 +36,39 @@ export default function Layout({ me, onLogout }: { me: Me; onLogout: () => void 
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6">
+        <InstallBanner />
         <Outlet />
       </main>
+    </div>
+  )
+}
+
+/** Scans need the GitHub App; say so prominently when it is missing. */
+function InstallBanner() {
+  const { data } = useApi<AppStatus>('/api/app')
+  const missing = data?.missingPermissions ?? []
+  if (!data || (data.installed && !data.suspended && missing.length === 0)) return null
+  if (data.installed && !data.suspended) {
+    return (
+      <div role="alert" className="mb-5 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-[14px] text-ink">
+        The GitHub App is missing permissions scans need: <span className="font-mono text-[13px]">{missing.join(', ')}</span>.
+        Add them under the app&rsquo;s <em>Permissions &amp; events</em> settings, then accept the change on the{' '}
+        {data.configureUrl ? <a href={data.configureUrl} className="font-medium text-accent hover:underline">installation page</a> : 'installation page'}.
+      </div>
+    )
+  }
+  return (
+    <div role="alert" className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-[14px] text-ink">
+      <span>
+        {data.suspended
+          ? 'The gitpulse GitHub App is suspended, so scans cannot read your repositories.'
+          : 'Install the gitpulse GitHub App so scans can read your repositories.'}
+      </span>
+      {(data.suspended ? data.configureUrl : data.installUrl) && (
+        <a href={data.suspended ? data.configureUrl : data.installUrl} className="font-medium text-accent hover:underline">
+          {data.suspended ? 'Open app settings' : 'Install on GitHub'}
+        </a>
+      )}
     </div>
   )
 }

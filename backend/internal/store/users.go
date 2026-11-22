@@ -13,33 +13,28 @@ import (
 var ErrNotFound = errors.New("not found")
 
 type User struct {
-	ID              int64
-	NodeID          string
-	Login           string
-	Name            string
-	AvatarURL       string
-	TokenCiphertext []byte
-	TokenNonce      []byte
-	TokenScopes     string
+	ID        int64
+	NodeID    string
+	Login     string
+	Name      string
+	AvatarURL string
 }
 
 type Store struct{ DB *pgxpool.Pool }
 
 func New(db *pgxpool.Pool) *Store { return &Store{DB: db} }
 
-// UpsertUser inserts or refreshes the user and their encrypted token, and makes
-// sure a settings row exists.
+// UpsertUser inserts or refreshes the user's profile and makes sure a settings
+// row exists. No GitHub token is stored: GitHub access uses installation tokens.
 func (s *Store) UpsertUser(ctx context.Context, u User) error {
 	return pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
-			INSERT INTO users (id, node_id, login, name, avatar_url, token_ciphertext, token_nonce, token_scopes)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			INSERT INTO users (id, node_id, login, name, avatar_url)
+			VALUES ($1,$2,$3,$4,$5)
 			ON CONFLICT (id) DO UPDATE SET
 			  node_id = EXCLUDED.node_id, login = EXCLUDED.login, name = EXCLUDED.name,
-			  avatar_url = EXCLUDED.avatar_url, token_ciphertext = EXCLUDED.token_ciphertext,
-			  token_nonce = EXCLUDED.token_nonce, token_scopes = EXCLUDED.token_scopes,
-			  updated_at = now()`,
-			u.ID, u.NodeID, u.Login, u.Name, u.AvatarURL, u.TokenCiphertext, u.TokenNonce, u.TokenScopes)
+			  avatar_url = EXCLUDED.avatar_url, updated_at = now()`,
+			u.ID, u.NodeID, u.Login, u.Name, u.AvatarURL)
 		if err != nil {
 			return err
 		}
@@ -49,13 +44,13 @@ func (s *Store) UpsertUser(ctx context.Context, u User) error {
 }
 
 const (
-	userCols  = `id, node_id, login, coalesce(name,''), coalesce(avatar_url,''), token_ciphertext, token_nonce, token_scopes`
-	userColsU = `u.id, u.node_id, u.login, coalesce(u.name,''), coalesce(u.avatar_url,''), u.token_ciphertext, u.token_nonce, u.token_scopes`
+	userCols  = `id, node_id, login, coalesce(name,''), coalesce(avatar_url,'')`
+	userColsU = `u.id, u.node_id, u.login, coalesce(u.name,''), coalesce(u.avatar_url,'')`
 )
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.NodeID, &u.Login, &u.Name, &u.AvatarURL, &u.TokenCiphertext, &u.TokenNonce, &u.TokenScopes)
+	err := row.Scan(&u.ID, &u.NodeID, &u.Login, &u.Name, &u.AvatarURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

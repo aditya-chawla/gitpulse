@@ -15,7 +15,8 @@ backend/    Go 1.27 · chi · pgx · embedded SQL migrations
   internal/detect    README/CI/tests + tech-stack detection
   internal/health    health score (pure, unit-tested)
   internal/stats     dashboard queries + aggregations (unit-tested)
-  internal/auth      GitHub OAuth, allowlist, sessions, token encryption
+  internal/auth      sign-in via the GitHub App, allowlist, sessions
+  internal/install   GitHub App installation lookup + scoped installation tokens
 frontend/   React · TypeScript · Vite · Tailwind · Recharts
 .github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan)
 render.yaml         Render Blueprint (API + static site)
@@ -28,18 +29,17 @@ docker-compose.yml  local Postgres + backend + frontend
 
 **Prerequisites:** Docker Desktop. Go 1.27+ and Node 24+ are only needed to run things outside Docker.
 
-1. **Create a GitHub OAuth app for local use** (see [GitHub OAuth app](#github-oauth-app)), with callback URL
+1. **Create a GitHub App for local use and install it** (see [GitHub App](#github-app)), with callback URL
    `http://localhost:8080/api/auth/callback`.
 2. **Configure the backend:**
    ```sh
    cp backend/.env.example backend/.env
    ```
-   Fill in `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `TOKEN_ENC_KEY` and `SCAN_SECRET`. The other defaults already suit local use. Generate the secrets with:
+   Fill in `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY` and `SCAN_SECRET`. The other defaults already suit local use. Generate the scan secret with:
    ```sh
-   openssl rand -base64 32   # TOKEN_ENC_KEY
    openssl rand -hex 32      # SCAN_SECRET
    ```
-   (PowerShell: `[Convert]::ToBase64String((1..32|%{[byte](Get-Random -Max 256)}))`.)
+   (PowerShell: `-join ((1..32)|%{'{0:x2}' -f (Get-Random -Max 256)})`.)
 3. **Start everything:**
    ```sh
    docker compose up --build
@@ -73,24 +73,73 @@ npm run lint && npm run typecheck && npm run build
 
 ---
 
-## GitHub OAuth app
+## GitHub App
 
-An OAuth app allows exactly **one** callback URL, so create **two apps**: one for local development and one for production.
+gitpulse is a **GitHub App**. One app does two jobs:
 
-1. Go to <https://github.com/settings/developers> → **OAuth Apps** → **New OAuth App**.
-2. Fill in:
+- **Sign-in.** "Sign in with GitHub" uses the app's user authorization. gitpulse uses the user token once to learn who you are, checks `ALLOWED_USERS`, then revokes the token. No user token is stored.
+- **API access.** Scans and write features use short-lived (1 hour) **installation tokens** minted with the app's private key. Scans ask for read-only tokens. Each write asks for a token limited to **one repository** and the single permission it needs.
 
-   | Field | Local app | Production app |
-   |---|---|---|
-   | Application name | `gitpulse (local)` | `gitpulse` |
-   | Homepage URL | `http://localhost:5173` | `https://<your-static-site>.onrender.com` |
-   | Authorization callback URL | `http://localhost:8080/api/auth/callback` | `https://<your-static-site>.onrender.com/api/auth/callback` |
+Each app has one webhook URL, so create **two apps**: one for local development, one for production.
 
-   The production callback goes through the **frontend** host. Render rewrites `/api/*` to the backend, so the session cookie belongs to the site you actually browse.
-3. Leave "Enable Device Flow" off. Click **Register application**, then **Generate a new client secret**.
-4. Put the Client ID and secret into `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`: in `backend/.env` locally, in the Render dashboard for production.
+### Create the app
 
-On first sign-in GitHub asks for the `repo` and `read:user` scopes. `repo` is required to read private repositories and Actions runs; OAuth apps have no read-only variant. gitpulse only ever reads. The token is stored encrypted with AES-256-GCM using `TOKEN_ENC_KEY`.
+Go to <https://github.com/settings/apps/new> and fill in:
+
+| Field | Local app | Production app |
+|---|---|---|
+| GitHub App name | `gitpulse-dev-<you>` (must be unique on GitHub) | `gitpulse-<you>` |
+| Homepage URL | `http://localhost:5173` | `https://<static-site-host>` |
+| Callback URL | `http://localhost:8080/api/auth/callback` | `https://<static-site-host>/api/auth/callback` |
+| Expire user authorization tokens | on (default) | on (default) |
+| Request user authorization (OAuth) during installation | off | off |
+| Webhook → Active | off for now (enabled with the PR assistant) | off for now (enabled with the PR assistant) |
+| Where can this GitHub App be installed? | Only on this account | Only on this account |
+
+The production callback goes through the **frontend** host. Render rewrites `/api/*` to the backend, so the session cookie belongs to the site you browse.
+
+**Repository permissions.** Grant only these; leave everything else, including all account permissions, at "No access":
+
+| Permission | Access | Why gitpulse needs it |
+|---|---|---|
+| Metadata | Read | Mandatory for every app. Lists your repos, branches, languages, topics, stars and forks. |
+| Contents | Read & write | **Read:** file trees and manifests (README/CI/test/stack detection), commit history and stats, tags. **Write:** only for two features, both off by default: creating *draft* releases and committing your profile README. gitpulse never pushes code. |
+| Pull requests | Read & write | **Read:** open PRs for health and the digest, and PR diffs for the PR assistant. **Write:** only to create or edit gitpulse's single comment on a PR, in repos where you chose "Comment on PR". Titles and labels are never changed. |
+| Issues | Read | Open issues for the digest, and each repo's existing labels (the PR assistant only suggests labels that already exist). |
+| Actions | Read | Failed workflow runs for the digest. |
+
+Then:
+
+1. **Create GitHub App.** On the app page, copy the **Client ID**, **Generate a new client secret**, and under **Private keys**, **Generate a private key** (a `.pem` downloads).
+2. Put them in `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` and `GITHUB_APP_PRIVATE_KEY`: in `backend/.env` locally, in the Render dashboard for production. The key goes in as base64 on one line:
+   ```sh
+   base64 -w0 gitpulse.private-key.pem     # macOS: base64 -i gitpulse.private-key.pem
+   ```
+   (PowerShell: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("gitpulse.private-key.pem"))`.) Then delete the downloaded file, or keep it in a password manager.
+3. **Install App** → your account → **All repositories**.
+
+### Why "All repositories"
+
+A GitHub App sees only the private repos it is installed on. Installing on all repos keeps analytics and health complete. GitHub grants permissions per installation, not per repo, so gitpulse enforces writes itself:
+
+- Every write feature has a per-repo switch in **Settings → Repository automation**, and all are **off** by default.
+- The PR assistant defaults to **Dashboard only**: it summarises PRs inside gitpulse and posts nothing.
+- A write uses a token minted for that one repo, so even a bug can't touch a different repo.
+
+If you install on selected repos instead, unselected private repos drop out of analytics and health.
+
+### Migrating from the v1 OAuth app
+
+The database migration drops the stored OAuth tokens. Scans and history stay; nothing else changes.
+
+1. Create the production GitHub App as above, and install it on all repositories.
+2. In Render → `gitpulse-api` → **Environment**:
+   - Replace `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` with the **app's** values.
+   - Add `GITHUB_APP_PRIVATE_KEY` (base64 of the `.pem`).
+   - Delete `TOKEN_ENC_KEY`; it's no longer used.
+   - Keep `OAUTH_REDIRECT_URL`, and make sure the app's callback URL is exactly the same.
+3. Deploy. Your existing session keeps working. Run **Scan now** to confirm, or sign out and back in through the app.
+4. Delete the old OAuth app (github.com/settings/developers), and revoke its access under github.com/settings/applications → **Authorized OAuth Apps**.
 
 ---
 
@@ -119,15 +168,15 @@ The free tier's 0.5 GB is plenty. Detail rows (branches, PRs, weekly commits…)
 2. In Render: **New → Blueprint**, connect the `gitpulse` repository, and Render reads `render.yaml`.
 3. Render asks for the `sync: false` values:
    - `DATABASE_URL`: the Neon direct connection string.
-   - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`: from the **production** OAuth app. If you haven't made it yet, enter placeholders and fix them in step 6.
+   - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`: from the **production** GitHub App. If you haven't made it yet, enter placeholders and fix them in step 6.
    - `OAUTH_REDIRECT_URL`: `https://<static-site-host>/api/auth/callback`.
    - `CORS_ALLOWED_ORIGINS`: `https://<static-site-host>`.
 
    Service hostnames are global, so if `gitpulse` or `gitpulse-api` is taken, Render adds a suffix. You'll see the real hosts after creation; placeholders are fine for now.
-   `TOKEN_ENC_KEY` and `SCAN_SECRET` are generated by Render.
+   `SCAN_SECRET` is generated by Render.
 4. Click **Apply**. When the services exist, note both URLs (e.g. `https://gitpulse-xxxx.onrender.com` and `https://gitpulse-api-xxxx.onrender.com`).
 5. **If the API host isn't exactly `gitpulse-api.onrender.com`**, edit the rewrite `destination` in `render.yaml` to the real host and push. The static site redeploys.
-6. Fix the values that depend on hosts: in the API service's **Environment** tab, set `OAUTH_REDIRECT_URL` and `CORS_ALLOWED_ORIGINS` to the real static-site host, and update the production OAuth app's Homepage and callback URLs to match.
+6. Fix the values that depend on hosts: in the API service's **Environment** tab, set `OAUTH_REDIRECT_URL` and `CORS_ALLOWED_ORIGINS` to the real static-site host, and update the production GitHub App's Homepage and Callback URLs to match.
 7. Open the static site, sign in, and press **Scan now**.
 
 ### Verify the rewrite proxies correctly
@@ -151,7 +200,7 @@ If the rewrite doesn't proxy correctly, serve the frontend from the Go server in
 1. In Render, delete the static site. Then edit the API service: **Settings → Build & Deploy**, set Dockerfile path `./Dockerfile.combined` and Docker context `.` (repo root). Also remove the `buildFilter`, or add `frontend/**` to it, so frontend changes redeploy.
    Or edit `render.yaml` to match and re-sync the Blueprint.
 2. The image sets `STATIC_DIR=/web` itself. Don't define `STATIC_DIR` in the service's environment, because an empty value overrides it.
-3. Use the API's own host everywhere: OAuth callback `https://<api-host>/api/auth/callback`, `CORS_ALLOWED_ORIGINS` empty.
+3. Use the API's own host everywhere: the app's callback `https://<api-host>/api/auth/callback`, `CORS_ALLOWED_ORIGINS` empty.
 
 ### Cross-origin setup (not recommended)
 
@@ -164,7 +213,7 @@ To keep two separate hosts without a rewrite: build the frontend with `VITE_API_
 Free Render services sleep after 15 idle minutes, so the app has no in-process scheduler. `.github/workflows/scan.yml` runs daily at 02:17 UTC (and on demand via **Actions → Daily scan → Run workflow**). It:
 
 1. retries `/healthz` for up to ~15 minutes to survive a cold start,
-2. calls `POST /api/scan` with the `X-Scan-Secret` header (scans every allowlisted user who has signed in once),
+2. calls `POST /api/scan` with the `X-Scan-Secret` header (scans every allowlisted user who has signed in once and installed the app),
 3. polls `GET /api/scans/{id}` every 30 s until the scan finishes. This keeps the instance awake and fails the workflow if the scan fails.
 
 **Repository secrets** (GitHub → repo → Settings → Secrets and variables → Actions → New repository secret):
@@ -185,10 +234,10 @@ Every backend variable is documented in [`backend/.env.example`](backend/.env.ex
 | Variable | Required | Purpose |
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres connection string |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | OAuth app credentials |
-| `OAUTH_REDIRECT_URL` | yes | Must equal the OAuth app's callback URL |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | GitHub App client ID (also the JWT issuer) and client secret |
+| `GITHUB_APP_PRIVATE_KEY` | yes | The app's private key, base64-encoded PEM; mints installation tokens |
+| `OAUTH_REDIRECT_URL` | yes | Must equal one of the app's callback URLs |
 | `ALLOWED_USERS` | yes | Comma-separated GitHub logins allowed to sign in |
-| `TOKEN_ENC_KEY` | yes | base64 of 32 bytes; encrypts stored GitHub tokens |
 | `SCAN_SECRET` | yes | ≥24 chars; authorises `POST /api/scan` from Actions |
 | `FRONTEND_URL` | no | Where to land after sign-in (`/` when same-origin) |
 | `CORS_ALLOWED_ORIGINS` | no | Extra origins allowed to call the API with cookies |
@@ -201,9 +250,10 @@ No secrets live in the repo: `.env` files are git-ignored, and production values
 ## Operational notes
 
 - **Rate limits:** scans batch work through GraphQL, send conditional REST requests (ETags cached in Postgres), wait when quota runs low, and honour `Retry-After` / secondary limits.
-- **Rotating `TOKEN_ENC_KEY`:** stored tokens can no longer be decrypted. Sign in again to re-store yours. Scans fail with a clear error until you do.
+- **Rotating the app's private key:** generate a new key on the app page, update `GITHUB_APP_PRIVATE_KEY`, deploy, then delete the old key on GitHub. Nothing else is affected, because installation tokens are minted on demand.
+- **App not installed or suspended:** scans fail with a clear error, and the dashboard shows an install banner.
 - **Removing someone from `ALLOWED_USERS`** takes effect on their next request.
-- **Limits of detection:** test and CI detection looks four directory levels deep. Commit stats cover default branches only and the last 52 weeks.
+- **Limits of detection:** test and CI detection looks four directory levels deep. Commit stats cover default branches only and the last 52 weeks. GitHub doesn't let apps list stargazers, so the digest shows star *counts* per repo, not who starred.
 
 ## Extending
 
