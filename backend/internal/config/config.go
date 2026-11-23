@@ -30,12 +30,18 @@ type Config struct {
 	// ProfileReadmeRepo overrides the profile repo (default <login>/<login>);
 	// point it at a sandbox repo for local testing.
 	ProfileReadmeRepo string
-	FrontendURL       string   // where the browser lands after login/logout
-	CORSOrigins       []string // extra origins allowed to call the API with credentials
-	CookieSecure      bool
-	CookieSameSite    http.SameSite
-	StaticDir         string // optional: serve built frontend from here
-	LogLevel          slog.Level
+
+	// MCP: the /mcp endpoint is enabled only when MCPToken is set. It acts
+	// as MCPUser; draft_release_notes exists only with MCPAllowWrites.
+	MCPToken       string
+	MCPUser        string
+	MCPAllowWrites bool
+	FrontendURL    string   // where the browser lands after login/logout
+	CORSOrigins    []string // extra origins allowed to call the API with credentials
+	CookieSecure   bool
+	CookieSameSite http.SameSite
+	StaticDir      string // optional: serve built frontend from here
+	LogLevel       slog.Level
 
 	LLM LLMConfig
 }
@@ -79,6 +85,9 @@ func Load() (*Config, error) {
 		ScanSecret:         req("SCAN_SECRET"),
 		WebhookSecret:      opt("GITHUB_WEBHOOK_SECRET", ""),
 		ProfileReadmeRepo:  opt("PROFILE_README_REPO", ""),
+		MCPToken:           opt("MCP_TOKEN", ""),
+		MCPUser:            strings.ToLower(opt("MCP_USER", "")),
+		MCPAllowWrites:     strings.EqualFold(opt("MCP_ALLOW_WRITES", "false"), "true"),
 		FrontendURL:        strings.TrimRight(opt("FRONTEND_URL", "/"), "/"),
 		CookieSecure:       opt("COOKIE_SECURE", "true") != "false",
 		StaticDir:          opt("STATIC_DIR", ""),
@@ -132,6 +141,21 @@ func Load() (*Config, error) {
 
 	if err := c.LogLevel.UnmarshalText([]byte(opt("LOG_LEVEL", "info"))); err != nil {
 		errs = append(errs, fmt.Errorf("LOG_LEVEL: %w", err))
+	}
+	if c.MCPToken != "" {
+		if len(c.MCPToken) < 32 {
+			errs = append(errs, errors.New("MCP_TOKEN must be at least 32 characters"))
+		}
+		switch {
+		case c.MCPUser == "" && len(c.AllowedUsers) == 1:
+			for u := range c.AllowedUsers {
+				c.MCPUser = u
+			}
+		case c.MCPUser == "":
+			errs = append(errs, errors.New("MCP_USER is required when ALLOWED_USERS lists more than one user"))
+		case !c.AllowedUsers[c.MCPUser]:
+			errs = append(errs, errors.New("MCP_USER must be one of ALLOWED_USERS"))
+		}
 	}
 	c.LLM, errs = loadLLM(opt, errs)
 	return c, errors.Join(errs...)

@@ -130,3 +130,30 @@ func TestLLMDefaultsAndOverrides(t *testing.T) {
 		t.Fatal("negative budget accepted")
 	}
 }
+
+func TestMCPConfig(t *testing.T) {
+	setBase(t) // ALLOWED_USERS has two users
+	t.Setenv("MCP_TOKEN", strings.Repeat("t", 32))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MCP_USER") {
+		t.Fatalf("two allowed users need MCP_USER: %v", err)
+	}
+	t.Setenv("MCP_USER", "Harshit3011")
+	c, err := Load()
+	if err != nil || c.MCPUser != "harshit3011" || c.MCPAllowWrites {
+		t.Fatalf("cfg=%+v err=%v", c, err)
+	}
+	t.Setenv("MCP_USER", "stranger")
+	if _, err := Load(); err == nil {
+		t.Fatal("MCP_USER outside the allowlist accepted")
+	}
+	t.Setenv("MCP_USER", "")
+	t.Setenv("ALLOWED_USERS", "harshit3011")
+	t.Setenv("MCP_ALLOW_WRITES", "true")
+	if c, err := Load(); err != nil || c.MCPUser != "harshit3011" || !c.MCPAllowWrites {
+		t.Fatalf("single user default: %+v %v", c, err)
+	}
+	t.Setenv("MCP_TOKEN", "short")
+	if _, err := Load(); err == nil {
+		t.Fatal("short MCP_TOKEN accepted")
+	}
+}

@@ -61,6 +61,11 @@ func (s *Store) GetUser(ctx context.Context, id int64) (*User, error) {
 	return scanUser(s.DB.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE id = $1`, id))
 }
 
+// GetUserByLogin finds a user by GitHub login (case-insensitive).
+func (s *Store) GetUserByLogin(ctx context.Context, login string) (*User, error) {
+	return scanUser(s.DB.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE lower(login) = lower($1)`, login))
+}
+
 // ListUsers returns all users; the cron scan iterates over them.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.DB.Query(ctx, `SELECT `+userCols+` FROM users ORDER BY id`)

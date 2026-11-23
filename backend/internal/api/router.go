@@ -36,6 +36,8 @@ type Deps struct {
 	PRs      *prreview.Service
 	Releases *releases.Service
 	Profile  *profile.Service
+	// MCP is the /mcp handler (already token-protected); nil disables it.
+	MCP http.Handler
 	// WebhookSecret verifies GitHub deliveries; empty disables the webhook.
 	WebhookSecret string
 	Scanner       *scanner.Scanner
@@ -79,6 +81,12 @@ func NewRouter(d Deps) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	// MCP over streamable HTTP. Authenticated by bearer token inside the
+	// handler; no cookies, so the browser-oriented CORS/origin checks don't apply.
+	if d.MCP != nil {
+		r.Handle("/mcp", d.MCP)
+	}
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(cors(d.CORSOrigins), originCheck(d.CORSOrigins), middleware.Timeout(30*time.Second))

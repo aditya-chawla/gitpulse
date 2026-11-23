@@ -48,6 +48,10 @@ services:
         value: lax
       - key: LOG_LEVEL
         value: info
+      # Optional, set in the dashboard when wanted (see README):
+      #   GITHUB_WEBHOOK_SECRET  PR assistant webhooks (without it: 30-min catch-up only)
+      #   MCP_TOKEN, MCP_ALLOW_WRITES  enable /mcp
+      #   ANTHROPIC_API_KEY (+ LLM_*)  AI summaries; off and $0 without a key
 
   - type: web
     name: gitpulse

@@ -7,6 +7,7 @@ A personal GitHub dashboard. It scans every repository you own and shows:
 - **Digest**: PRs waiting on you, new issues, failed workflow runs, and new stars/forks since the previous scan.
 - **Release notes**: grouped notes since the last release with a semver suggestion, created as a GitHub *draft* release.
 - **Profile README**: keeps a marked block in your profile README current (languages, active projects, Medium articles).
+- **MCP server**: ask Claude about your repos (health, languages, activity, digest, PR reviews) via `/mcp` or a stdio proxy.
 - **PR assistant**: reviews each new commit on your open PRs (risky changes, label suggestions, optional AI summary), in the dashboard or as one self-updating PR comment.
 
 The dashboard reads only from Postgres. A **scan** fetches everything from GitHub and stores it as a snapshot, so you get trends over time. Scans run daily from GitHub Actions, or on demand from the **Scan now** button.
@@ -24,6 +25,8 @@ backend/    Go 1.27 · chi · pgx · embedded SQL migrations
   internal/prreview  PR assistant: webhook/sync queue, rules, comment upsert
   internal/releases  release notes: base tag, grouping, semver, draft releases
   internal/profile   profile README block: markers, Medium RSS, commit-if-changed
+  internal/mcpserver MCP tools over streamable HTTP (/mcp)
+  cmd/gitpulse-mcp   stdio proxy for local MCP clients (Claude Desktop)
 frontend/   React · TypeScript · Vite · Tailwind · Recharts
 .github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan) · pr-sync.yml (every 30 min) · profile-readme.yml (weekly)
 render.yaml         Render Blueprint (API + static site)
@@ -344,6 +347,71 @@ gitpulse can keep a block in your GitHub profile README (`<login>/<login>`) up t
 
 ---
 
+## MCP server
+
+gitpulse exposes its data to AI assistants over the [Model Context Protocol](https://modelcontextprotocol.io). It uses the official Go SDK, with streamable HTTP at **`https://<api-host>/mcp`**. Use the API host directly, not the static site.
+
+| Tool | What it returns |
+|---|---|
+| `list_repos_needing_attention` | Lowest-scoring repos, worst first, with the checks each one misses (`limit`, `maxScore`, `includeArchived`) |
+| `get_repo_health` | Score, full breakdown, open PRs/issues, stale branches and failed runs for one repo (`repo`) |
+| `get_language_stats` | Language mix by bytes, and by year |
+| `get_activity` | Weekly commits, streaks, busiest weekday/hour, top repos by commits (`weeks`) |
+| `get_digest` | What changed since the previous scan |
+| `get_pr_reviews` | Recent PR assistant reviews (`repo`, `limit`) |
+| `draft_release_notes` | **Write.** Creates a *draft* release with notes since the last release (`repo`, optional `version`). Only exists when `MCP_ALLOW_WRITES=true`, and only works in repos whose **Draft releases** switch is on. It never publishes. |
+
+All other tools are read-only and annotated as such.
+
+**Security:**
+- Requests need `Authorization: Bearer <MCP_TOKEN>`, compared in constant time.
+- Without `MCP_TOKEN`, `/mcp` answers `503`.
+- The token acts as one gitpulse user: `MCP_USER`, which defaults to the only entry in `ALLOWED_USERS`. That user must have signed in once.
+- The server is stateless, so it survives the free instance sleeping. The first call after a sleep can take a minute.
+
+**Setup:**
+
+1. Generate a token: `openssl rand -hex 32`. Set it as `MCP_TOKEN` on the Render API service. Optionally set `MCP_ALLOW_WRITES=true`.
+2. Connect a client:
+
+**Claude Code** (speaks streamable HTTP directly):
+
+```sh
+claude mcp add --transport http --scope user gitpulse https://<api-host>/mcp \
+  --header "Authorization: Bearer <MCP_TOKEN>"
+```
+
+Then ask, for example: "Which of my repos need attention?" Run `/mcp` inside Claude Code to check the connection.
+
+**Claude Desktop** (launches local stdio servers): use the small proxy in `backend/cmd/gitpulse-mcp`. It connects to `/mcp`, mirrors the remote tool list, and retries for up to 3 minutes while a sleeping instance wakes.
+
+```sh
+go install github.com/harshit3011/gitpulse/backend/cmd/gitpulse-mcp@latest
+# or, from a clone:  cd backend && go build -o gitpulse-mcp ./cmd/gitpulse-mcp
+```
+
+Edit `claude_desktop_config.json`: **Settings → Developer → Edit Config**. On Windows it's `%APPDATA%\Claude\claude_desktop_config.json`, on macOS `~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+```json
+{
+  "mcpServers": {
+    "gitpulse": {
+      "command": "C:\\Users\\<you>\\go\\bin\\gitpulse-mcp.exe",
+      "env": {
+        "GITPULSE_MCP_URL": "https://<api-host>/mcp",
+        "GITPULSE_MCP_TOKEN": "<MCP_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The gitpulse tools appear in the tools menu.
+
+The token grants read access to your dashboard data, and with writes on, draft creation. Treat it like a password: don't commit config files that contain it. To revoke it, change `MCP_TOKEN` on Render.
+
+---
+
 ## AI (optional)
 
 gitpulse works fully without AI. Every AI feature has a rule-based fallback, and the UI shows a small "AI off" note where a summary would go. **No API key means no network calls, no errors, and $0.**
@@ -397,6 +465,8 @@ Every backend variable is documented in [`backend/.env.example`](backend/.env.ex
 | `PORT`, `LOG_LEVEL` | no | `8080`, `info` |
 | `PROFILE_README_REPO` | no | Profile README target (default `<login>/<login>`); point at a sandbox locally |
 | `GITHUB_WEBHOOK_SECRET` | no | Verifies webhook deliveries; without it only the 30-minute catch-up runs |
+| `MCP_TOKEN` | no | Enables `/mcp` (≥32 chars, bearer token); see [MCP server](#mcp-server) |
+| `MCP_USER` / `MCP_ALLOW_WRITES` | no | Which user the token acts as (default: the only allowlisted user) / enable `draft_release_notes` (default `false`) |
 | `ANTHROPIC_API_KEY`, `LLM_*` | no | Optional AI; see [AI (optional)](#ai-optional) |
 
 No secrets live in the repo: `.env` files are git-ignored, and production values live in Render and GitHub secrets.
@@ -411,4 +481,10 @@ No secrets live in the repo: `.env` files are git-ignored, and production values
 
 ## Extending
 
-The v2 ideas (AI PR summaries, release notes, profile README updater, MCP server) slot in without restructuring. `internal/github.Client` is the single GitHub access point, and `internal/stats.Service` is the single read model. A new feature adds an endpoint or job that uses one or both.
+Each feature is its own package (`prreview`, `releases`, `profile`, `mcpserver`) built on three shared pieces:
+
+- `internal/github` is the single GitHub access point.
+- `internal/install` mints installation tokens, read-only or scoped to one repo and one permission.
+- `internal/llm` is the only path to a model, with budget, cache and sanitising.
+
+A new write feature should get a token through `install.RepoToken` and add a per-repo switch, which is off by default.

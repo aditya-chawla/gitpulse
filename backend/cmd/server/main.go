@@ -20,6 +20,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/llm"
+	"github.com/harshit3011/gitpulse/backend/internal/mcpserver"
 	"github.com/harshit3011/gitpulse/backend/internal/profile"
 	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/releases"
@@ -71,6 +72,14 @@ func run() error {
 	rels := releases.New(pool, st, relAccess{installs, log}, ai, log)
 	statsSvc := stats.NewService(pool)
 	prof := profile.New(pool, statsSvc, profAccess{installs, log}, cfg.ProfileReadmeRepo, log)
+	mcpSrv := mcpserver.NewServer(mcpserver.Live{
+		Store: st, Stats: statsSvc, PRs: prs, Releases: rels, Login: cfg.MCPUser, Allowed: authSvc.Allowed,
+	}, cfg.MCPAllowWrites, log)
+	if cfg.MCPToken == "" {
+		log.Info("MCP_TOKEN not set: /mcp disabled")
+	} else {
+		log.Info("MCP enabled at /mcp", "user", cfg.MCPUser, "writes", cfg.MCPAllowWrites)
+	}
 	if cfg.WebhookSecret == "" {
 		log.Info("GITHUB_WEBHOOK_SECRET not set: webhooks disabled; PRs are picked up by /api/prs/sync")
 	}
@@ -89,7 +98,7 @@ func run() error {
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, PRs: prs, Releases: rels, Profile: prof, WebhookSecret: cfg.WebhookSecret, Scanner: scn, Stats: statsSvc, ScanSecret: cfg.ScanSecret,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, PRs: prs, Releases: rels, Profile: prof, MCP: mcpserver.Handler(mcpSrv, cfg.MCPToken, log), WebhookSecret: cfg.WebhookSecret, Scanner: scn, Stats: statsSvc, ScanSecret: cfg.ScanSecret,
 			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
