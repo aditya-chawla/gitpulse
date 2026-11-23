@@ -6,6 +6,7 @@ A personal GitHub dashboard. It scans every repository you own and shows:
 - **Repo health**: a 0–100 score per repo with a visible breakdown (README, license, CI, tests, recent activity, stale branches, old PRs, description/topics), an active/slowing/dormant status, and a sortable, filterable table with a detail page per repo.
 - **Digest**: PRs waiting on you, new issues, failed workflow runs, and new stars/forks since the previous scan.
 - **Release notes**: grouped notes since the last release with a semver suggestion, created as a GitHub *draft* release.
+- **Profile README**: keeps a marked block in your profile README current (languages, active projects, Medium articles).
 - **PR assistant**: reviews each new commit on your open PRs (risky changes, label suggestions, optional AI summary), in the dashboard or as one self-updating PR comment.
 
 The dashboard reads only from Postgres. A **scan** fetches everything from GitHub and stores it as a snapshot, so you get trends over time. Scans run daily from GitHub Actions, or on demand from the **Scan now** button.
@@ -22,8 +23,9 @@ backend/    Go 1.27 · chi · pgx · embedded SQL migrations
   internal/llm       optional AI: provider interface, budget, cache, sanitising
   internal/prreview  PR assistant: webhook/sync queue, rules, comment upsert
   internal/releases  release notes: base tag, grouping, semver, draft releases
+  internal/profile   profile README block: markers, Medium RSS, commit-if-changed
 frontend/   React · TypeScript · Vite · Tailwind · Recharts
-.github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan) · pr-sync.yml (every 30 min)
+.github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan) · pr-sync.yml (every 30 min) · profile-readme.yml (weekly)
 render.yaml         Render Blueprint (API + static site)
 docker-compose.yml  local Postgres + backend + frontend
 ```
@@ -228,7 +230,7 @@ Free Render services sleep after 15 idle minutes, so the app has no in-process s
 | `GITPULSE_API_URL` | The API's public URL, e.g. `https://gitpulse-api.onrender.com` (no trailing slash). In the single-service fallback, the one service's URL. |
 | `SCAN_SECRET` | Copy the `SCAN_SECRET` value from the Render API service's Environment tab. |
 
-`pr-sync.yml` (the [PR assistant](#pr-assistant)'s 30-minute catch-up) uses the same two secrets. CI (`ci.yml`) needs no secrets.
+`pr-sync.yml` (the [PR assistant](#pr-assistant)'s 30-minute catch-up) and `profile-readme.yml` (the weekly [profile README](#profile-readme) refresh) use the same two secrets. CI (`ci.yml`) needs no secrets.
 
 ---
 
@@ -313,6 +315,35 @@ You can edit the version and the notes, then **Create draft release**. That need
 
 ---
 
+## Profile README
+
+gitpulse can keep a block in your GitHub profile README (`<login>/<login>`) up to date:
+
+- **Top languages**, by bytes, across your public, non-fork repos. Your Settings exclusions apply.
+- **Recently active projects:** your 5 most recently pushed public repos, leaving out forks, archived repos and the profile repo itself.
+- **Latest articles:** the 5 newest posts from your Medium RSS feed.
+
+**Private repositories are never mentioned.** The block contains no timestamps, so it only changes when your data does.
+
+**Setup:**
+
+1. In your profile repo's README, add the two markers where the block should go:
+   ```markdown
+   <!-- gitpulse:start -->
+   <!-- gitpulse:end -->
+   ```
+   gitpulse replaces **only** the text between them, keeping every other byte, including line endings. It refuses to run if a marker is missing, repeated or out of order.
+2. **Settings → Profile README:**
+   - Optionally enter your Medium feed URL. Only `https://medium.com/feed/@you`, `https://medium.com/feed/<publication>` or `https://<you>.medium.com/feed` are accepted. The fetch has a 10-second timeout and a 2 MB cap, and redirects off Medium are refused.
+   - Press **Preview** to see the current block next to the new one.
+3. Tick **Allow gitpulse to commit**, then **Save**. **Update README now** commits once, and only if the block changed. The commit message is `chore(gitpulse): refresh profile README stats`, and it uses a `contents: write` token limited to the profile repo.
+
+`.github/workflows/profile-readme.yml` runs weekly on Mondays at 06:23 UTC, and can also be started manually. It does nothing for users who haven't turned the feature on. If the Medium feed is down, the update is skipped rather than removing the articles section. Each run is logged in `profile_readme_runs`, and the last one shows in the preview.
+
+`PROFILE_README_REPO` overrides the target repo. Locally it should point at a sandbox repo, so testing never touches your real profile. The repo must be one of yours that a scan has seen.
+
+---
+
 ## AI (optional)
 
 gitpulse works fully without AI. Every AI feature has a rule-based fallback, and the UI shows a small "AI off" note where a summary would go. **No API key means no network calls, no errors, and $0.**
@@ -364,6 +395,7 @@ Every backend variable is documented in [`backend/.env.example`](backend/.env.ex
 | `COOKIE_SECURE` / `COOKIE_SAMESITE` | no | `true` / `lax` by default |
 | `STATIC_DIR` | no | Serve a built frontend from the Go server |
 | `PORT`, `LOG_LEVEL` | no | `8080`, `info` |
+| `PROFILE_README_REPO` | no | Profile README target (default `<login>/<login>`); point at a sandbox locally |
 | `GITHUB_WEBHOOK_SECRET` | no | Verifies webhook deliveries; without it only the 30-minute catch-up runs |
 | `ANTHROPIC_API_KEY`, `LLM_*` | no | Optional AI; see [AI (optional)](#ai-optional) |
 

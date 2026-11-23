@@ -26,13 +26,16 @@ type Config struct {
 	ScanSecret         string
 	// WebhookSecret verifies GitHub webhook deliveries. Optional: without it
 	// the webhook endpoint answers 503 and the catch-up sync still works.
-	WebhookSecret  string
-	FrontendURL    string   // where the browser lands after login/logout
-	CORSOrigins    []string // extra origins allowed to call the API with credentials
-	CookieSecure   bool
-	CookieSameSite http.SameSite
-	StaticDir      string // optional: serve built frontend from here
-	LogLevel       slog.Level
+	WebhookSecret string
+	// ProfileReadmeRepo overrides the profile repo (default <login>/<login>);
+	// point it at a sandbox repo for local testing.
+	ProfileReadmeRepo string
+	FrontendURL       string   // where the browser lands after login/logout
+	CORSOrigins       []string // extra origins allowed to call the API with credentials
+	CookieSecure      bool
+	CookieSameSite    http.SameSite
+	StaticDir         string // optional: serve built frontend from here
+	LogLevel          slog.Level
 
 	LLM LLMConfig
 }
@@ -75,6 +78,7 @@ func Load() (*Config, error) {
 		OAuthRedirectURL:   req("OAUTH_REDIRECT_URL"),
 		ScanSecret:         req("SCAN_SECRET"),
 		WebhookSecret:      opt("GITHUB_WEBHOOK_SECRET", ""),
+		ProfileReadmeRepo:  opt("PROFILE_README_REPO", ""),
 		FrontendURL:        strings.TrimRight(opt("FRONTEND_URL", "/"), "/"),
 		CookieSecure:       opt("COOKIE_SECURE", "true") != "false",
 		StaticDir:          opt("STATIC_DIR", ""),
@@ -90,6 +94,11 @@ func Load() (*Config, error) {
 		}
 	}
 
+	if r := c.ProfileReadmeRepo; r != "" {
+		if o, n, ok := strings.Cut(r, "/"); !ok || o == "" || n == "" || strings.Contains(n, "/") {
+			errs = append(errs, errors.New("PROFILE_README_REPO must look like owner/name"))
+		}
+	}
 	if key := req("GITHUB_APP_PRIVATE_KEY"); key != "" {
 		k, err := github.ParsePrivateKey(key)
 		if err != nil {

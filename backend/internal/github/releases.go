@@ -2,11 +2,13 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -183,4 +185,45 @@ func (c *HTTPClient) CreateDraftRelease(ctx context.Context, repo RepoRef, tag, 
 		return nil, err
 	}
 	return &Release{ID: g.ID, TagName: g.TagName, Name: g.Name, Draft: g.Draft, HTMLURL: g.HTMLURL}, nil
+}
+
+// Readme returns the repo's README path, text and blob SHA.
+func (c *HTTPClient) Readme(ctx context.Context, repo RepoRef) (path, text, sha string, err error) {
+	var g struct {
+		Path     string `json:"path"`
+		SHA      string `json:"sha"`
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := c.getJSON(ctx, repoPath(repo)+"/readme", &g); err != nil {
+		return "", "", "", err
+	}
+	if g.Encoding != "base64" {
+		return "", "", "", fmt.Errorf("readme: unexpected encoding %q", g.Encoding)
+	}
+	b, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(g.Content, "\n", ""))
+	if err != nil {
+		return "", "", "", fmt.Errorf("readme: %w", err)
+	}
+	return g.Path, string(b), g.SHA, nil
+}
+
+// UpdateFile commits new content for an existing file. sha must be the blob
+// SHA that was read, so a concurrent edit makes GitHub reject the write (409).
+func (c *HTTPClient) UpdateFile(ctx context.Context, repo RepoRef, path, message, content, sha string) (commitSHA, commitURL string, err error) {
+	in := map[string]string{"message": message, "content": base64.StdEncoding.EncodeToString([]byte(content)), "sha": sha}
+	var out struct {
+		Commit struct {
+			SHA     string `json:"sha"`
+			HTMLURL string `json:"html_url"`
+		} `json:"commit"`
+	}
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	if err := c.send(ctx, http.MethodPut, repoPath(repo)+"/contents/"+strings.Join(segs, "/"), in, &out); err != nil {
+		return "", "", err
+	}
+	return out.Commit.SHA, out.Commit.HTMLURL, nil
 }

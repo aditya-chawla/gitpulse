@@ -369,3 +369,29 @@ export interface ReleaseDraft {
   source: 'ui' | 'mcp'
   createdAt: string
 }
+
+export interface ProfileSettings {
+  enabled: boolean
+  feedUrl: string
+}
+
+export interface ProfileRun {
+  outcome: 'updated' | 'unchanged' | 'no_markers' | 'disabled' | 'failed'
+  commitUrl?: string
+  error?: string
+  at: string
+}
+
+export interface ProfilePreview {
+  repo: string
+  enabled: boolean
+  feedUrl: string
+  readmePath?: string
+  markerError?: string
+  current: string
+  proposed: string
+  changed: boolean
+  feedError?: string
+  articles: number
+  lastRun?: ProfileRun
+}

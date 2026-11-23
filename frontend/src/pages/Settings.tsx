@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import {
-  api, ApiError, isNoData, type AppStatus, type LLMUsage, type NoData, type PRMode, type RepoSetting, type ReposResponse,
-  type Settings,
+  api, ApiError, isNoData, type AppStatus, type LLMUsage, type NoData, type PRMode, type ProfilePreview, type ProfileRun,
+  type ProfileSettings, type RepoSetting, type ReposResponse, type Settings,
 } from '../api'
 import { Card, ErrorBox, Pill, ScoreMeter, Spinner } from '../components/ui'
 import { useApi, useData } from '../data'
+import { ago } from '../format'
 
 // Mirrors Go's path.Match for the preview (*, ?, [...]), case-insensitive.
 function globToRegex(glob: string): RegExp | null {
@@ -88,6 +89,7 @@ function Form({ initial, repos }: { initial: Settings; repos: ReposResponse['rep
 
       <AppCard />
       <AutomationCard />
+      <ProfileReadmeCard />
       <AiUsageCard />
 
       {/* The sticky save bar is scoped to this section: the cards above save immediately. */}
@@ -337,6 +339,117 @@ function AiUsageCard() {
           ) : <p className="text-[13px] text-muted">No AI calls yet this month.</p>}
         </div>
       )}
+    </Card>
+  )
+}
+
+const runText: Record<ProfileRun['outcome'], string> = {
+  updated: 'Updated', unchanged: 'No change needed', no_markers: 'Markers missing', disabled: 'Off', failed: 'Failed',
+}
+
+function ProfileReadmeCard() {
+  const q = useApi<{ settings: ProfileSettings; repo: string }>('/api/profile-readme/settings')
+  const [form, setForm] = useState<ProfileSettings>()
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string }>()
+  const [preview, setPreview] = useState<ProfilePreview>()
+  const [busy, setBusy] = useState<'preview' | 'apply'>()
+
+  if (q.error) return <ErrorBox error={q.error} onRetry={q.reload} />
+  if (!q.data) return null
+  const st = form ?? q.data.settings
+  const dirty = !!form && (form.enabled !== q.data.settings.enabled || form.feedUrl !== q.data.settings.feedUrl)
+
+  const save = async () => {
+    setSaving(true)
+    setMsg(undefined)
+    try {
+      await api('/api/profile-readme/settings', { method: 'PUT', body: JSON.stringify(st) })
+      q.reload()
+      setForm(undefined)
+      setPreview(undefined)
+      setMsg({ ok: true, text: 'Saved.' })
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Save failed' })
+    } finally {
+      setSaving(false)
+    }
+  }
+  const loadPreview = async () => {
+    setBusy('preview')
+    setMsg(undefined)
+    try {
+      setPreview(await api<ProfilePreview>('/api/profile-readme/preview'))
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Preview failed' })
+    } finally {
+      setBusy(undefined)
+    }
+  }
+  const apply = async () => {
+    setBusy('apply')
+    setMsg(undefined)
+    try {
+      const run = await api<ProfileRun>('/api/profile-readme/apply', { method: 'POST' })
+      await loadPreview()
+      setMsg({ ok: run.outcome === 'updated' || run.outcome === 'unchanged', text: `${runText[run.outcome]}${run.error ? `: ${run.error}` : ''}` })
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Update failed' })
+      setBusy(undefined)
+    }
+  }
+
+  return (
+    <Card title="Profile README" subtitle={<>Keeps a block in <code className="font-mono">{q.data.repo}</code>&rsquo;s README up to date: top languages, recently active projects and your latest Medium articles. Public repositories only. Only the text between <code className="font-mono">{'<!-- gitpulse:start -->'}</code> and <code className="font-mono">{'<!-- gitpulse:end -->'}</code> is ever changed.</>}>
+      <div className="space-y-3 text-[14px] text-ink-2">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={st.enabled} onChange={(e) => setForm({ ...st, enabled: e.target.checked })} />
+          Allow gitpulse to commit to {q.data.repo} (weekly, and when you press Update)
+        </label>
+        <label className="flex flex-wrap items-center gap-2">
+          Medium feed
+          <input value={st.feedUrl} onChange={(e) => setForm({ ...st, feedUrl: e.target.value })} placeholder="https://medium.com/feed/@you" spellCheck={false}
+            aria-label="Medium feed URL" className="w-full max-w-sm rounded-lg border border-line bg-surface-2 px-3 py-1.5 font-mono text-[13px] text-ink placeholder:text-muted" />
+        </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <button onClick={save} disabled={!dirty || saving} className="rounded-lg border border-line px-3 py-1.5 text-[13px] font-medium text-ink hover:bg-surface-2 disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button onClick={loadPreview} disabled={!!busy || dirty} className="rounded-lg border border-line px-3 py-1.5 text-[13px] font-medium text-ink hover:bg-surface-2 disabled:opacity-50">
+            {busy === 'preview' ? 'Building preview…' : 'Preview'}
+          </button>
+          {msg && <span role="status" className={`text-[13px] ${msg.ok ? 'text-good-text' : 'text-critical'}`}>{msg.text}</span>}
+        </div>
+        {preview && (
+          <div className="space-y-2">
+            {preview.lastRun && (
+              <p className="text-[12px] text-muted">Last run: {runText[preview.lastRun.outcome]} {ago(preview.lastRun.at)}
+                {preview.lastRun.commitUrl && <> · <a href={preview.lastRun.commitUrl} className="text-accent hover:underline">commit</a></>}</p>
+            )}
+            {preview.markerError && <p className="text-[13px] text-critical">{preview.markerError}. Add both markers to {preview.readmePath ?? 'the README'} where the block should go.</p>}
+            {preview.feedError && <p className="text-[13px] text-critical">Medium feed: {preview.feedError}</p>}
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="min-w-0">
+                <h3 className="mb-1 text-[13px] font-medium text-ink">Now in the README</h3>
+                <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-surface-2 p-3 font-mono text-[12px]">{preview.markerError ? '—' : preview.current || '(empty)'}</pre>
+              </div>
+              <div className="min-w-0">
+                <h3 className="mb-1 text-[13px] font-medium text-ink">gitpulse would write</h3>
+                <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-surface-2 p-3 font-mono text-[12px]">{preview.proposed}</pre>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button onClick={apply} disabled={!preview.enabled || !preview.changed || !!preview.markerError || !!busy}
+                className="rounded-lg bg-accent px-4 py-2 text-[14px] font-medium text-white disabled:opacity-50">
+                {busy === 'apply' ? 'Committing…' : 'Update README now'}
+              </button>
+              <span className="text-[12px] text-muted">
+                {!preview.enabled ? 'Turn on and save the switch above to allow commits.' : !preview.changed ? 'Nothing has changed: no commit needed.' : 'One commit, only inside the markers.'}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
     </Card>
   )
 }

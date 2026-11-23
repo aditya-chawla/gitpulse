@@ -20,6 +20,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/llm"
+	"github.com/harshit3011/gitpulse/backend/internal/profile"
 	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/releases"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
@@ -68,6 +69,8 @@ func run() error {
 	prs := prreview.New(pool, st, prAccess{installs, log}, ai, log)
 	prs.Start(ctx)
 	rels := releases.New(pool, st, relAccess{installs, log}, ai, log)
+	statsSvc := stats.NewService(pool)
+	prof := profile.New(pool, statsSvc, profAccess{installs, log}, cfg.ProfileReadmeRepo, log)
 	if cfg.WebhookSecret == "" {
 		log.Info("GITHUB_WEBHOOK_SECRET not set: webhooks disabled; PRs are picked up by /api/prs/sync")
 	}
@@ -86,7 +89,7 @@ func run() error {
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, PRs: prs, Releases: rels, WebhookSecret: cfg.WebhookSecret, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, PRs: prs, Releases: rels, Profile: prof, WebhookSecret: cfg.WebhookSecret, Scanner: scn, Stats: statsSvc, ScanSecret: cfg.ScanSecret,
 			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -140,6 +143,25 @@ func (a prAccess) Writer(ctx context.Context, u *store.User, repoID int64) (prre
 }
 
 func (a prAccess) BotLogin(ctx context.Context) (string, error) { return a.inst.BotLogin(ctx) }
+
+// profAccess: read-only README reads, and a contents:write token scoped to
+// the profile repo for the commit.
+type profAccess struct {
+	inst *install.Service
+	log  *slog.Logger
+}
+
+func (a profAccess) Read(ctx context.Context, u *store.User) (profile.Reader, error) {
+	return a.inst.ReadClient(ctx, u, github.WithLogger(a.log))
+}
+
+func (a profAccess) ReadmeWriter(ctx context.Context, u *store.User, repoID int64) (profile.Writer, error) {
+	tok, err := a.inst.RepoToken(ctx, u, repoID, map[string]string{"contents": "write"})
+	if err != nil {
+		return nil, err
+	}
+	return github.New(tok, github.WithLogger(a.log)), nil
+}
 
 // relAccess: read-only clients, and a contents:write token scoped to one repo
 // for creating draft releases.

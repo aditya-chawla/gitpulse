@@ -1,0 +1,59 @@
+name: Profile README
+
+# Weekly refresh of the gitpulse block in each user's profile README. Does
+# nothing unless the user turned it on in Settings, and commits only when the
+# block's content changed.
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC, after the daily scan
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: profile-readme
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      API_URL: ${{ secrets.GITPULSE_API_URL }}
+      SCAN_SECRET: ${{ secrets.SCAN_SECRET }}
+    steps:
+      - name: Check configuration
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$SCAN_SECRET" ]; then
+            echo "::error::Set the GITPULSE_API_URL and SCAN_SECRET repository secrets."
+            exit 1
+          fi
+
+      - name: Wake the backend (cold start can take a minute or more)
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 60 "$API_URL/healthz" >/dev/null; then
+              echo "Backend is up (attempt $i)"; exit 0
+            fi
+            echo "Not up yet (attempt $i), retrying in 15s"; sleep 15
+          done
+          echo "::error::Backend did not respond within ~15 minutes"; exit 1
+
+      - name: Update profile README
+        run: |
+          for i in $(seq 1 3); do
+            code=$(curl -sS --max-time 120 -o resp.json -w '%{http_code}' -X POST \
+              -H "X-Scan-Secret: $SCAN_SECRET" "$API_URL/api/profile-readme/apply" || echo 000)
+            if [ "$code" = "200" ]; then
+              jq -r '.users[] | "\(.repo): \(.run.outcome) \(.run.commitUrl // "") \(.run.error // "")"' resp.json
+              if jq -e '.users[] | select(.run.outcome == "failed")' resp.json >/dev/null; then
+                echo "::error::Profile README update failed"; exit 1
+              fi
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $code $(cat resp.json 2>/dev/null)"
+            case "$code" in 401) exit 1 ;; esac
+            sleep 30
+          done
+          exit 1

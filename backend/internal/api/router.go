@@ -18,6 +18,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/llm"
+	"github.com/harshit3011/gitpulse/backend/internal/profile"
 	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/releases"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
@@ -34,6 +35,7 @@ type Deps struct {
 	LLM      *llm.Service
 	PRs      *prreview.Service
 	Releases *releases.Service
+	Profile  *profile.Service
 	// WebhookSecret verifies GitHub deliveries; empty disables the webhook.
 	WebhookSecret string
 	Scanner       *scanner.Scanner
@@ -52,6 +54,7 @@ type handlers struct {
 	llm        *llm.Service
 	prs        *prreview.Service
 	releases   *releases.Service
+	profile    *profile.Service
 	webhookKey []byte
 	scanner    *scanner.Scanner
 	stats      *stats.Service
@@ -59,7 +62,7 @@ type handlers struct {
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, prs: d.PRs, releases: d.Releases, webhookKey: []byte(d.WebhookSecret), scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
+	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, prs: d.PRs, releases: d.Releases, profile: d.Profile, webhookKey: []byte(d.WebhookSecret), scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, requestLogger(d.Log), middleware.Recoverer)
 
@@ -90,6 +93,7 @@ func NewRouter(d Deps) http.Handler {
 		// Secret-or-session endpoints authenticate inside the handler.
 		r.Post("/scan", h.startScan)
 		r.Post("/prs/sync", h.syncPRs)
+		r.Post("/profile-readme/apply", h.profileApply)
 		r.Get("/scans/{id:[0-9]+}", h.getScan)
 
 		r.Group(func(r chi.Router) {
@@ -112,6 +116,9 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/repos/{id:[0-9]+}/release-notes/preview", h.releasePreview)
 			r.Post("/repos/{id:[0-9]+}/releases", h.createRelease)
 			r.Get("/releases/drafts", h.releaseDrafts)
+			r.Get("/profile-readme/settings", h.getProfileSettings)
+			r.Put("/profile-readme/settings", h.putProfileSettings)
+			r.Get("/profile-readme/preview", h.profilePreview)
 			r.Get("/repo-settings", h.listRepoSettings)
 			r.Put("/repo-settings/{id:[0-9]+}", h.putRepoSetting)
 		})
