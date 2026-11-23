@@ -5,6 +5,7 @@ A personal GitHub dashboard. It scans every repository you own and shows:
 - **Analytics**: language mix (overall and per repo), language trend by year, weekly commits, when you commit (day × hour, in your timezone), streaks, top repos by stars, forks and your commits, and the detected tech stack.
 - **Repo health**: a 0–100 score per repo with a visible breakdown (README, license, CI, tests, recent activity, stale branches, old PRs, description/topics), an active/slowing/dormant status, and a sortable, filterable table with a detail page per repo.
 - **Digest**: PRs waiting on you, new issues, failed workflow runs, and new stars/forks since the previous scan.
+- **Release notes**: grouped notes since the last release with a semver suggestion, created as a GitHub *draft* release.
 - **PR assistant**: reviews each new commit on your open PRs (risky changes, label suggestions, optional AI summary), in the dashboard or as one self-updating PR comment.
 
 The dashboard reads only from Postgres. A **scan** fetches everything from GitHub and stores it as a snapshot, so you get trends over time. Scans run daily from GitHub Actions, or on demand from the **Scan now** button.
@@ -20,6 +21,7 @@ backend/    Go 1.27 · chi · pgx · embedded SQL migrations
   internal/install   GitHub App installation lookup + scoped installation tokens
   internal/llm       optional AI: provider interface, budget, cache, sanitising
   internal/prreview  PR assistant: webhook/sync queue, rules, comment upsert
+  internal/releases  release notes: base tag, grouping, semver, draft releases
 frontend/   React · TypeScript · Vite · Tailwind · Recharts
 .github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan) · pr-sync.yml (every 30 min)
 render.yaml         Render Blueprint (API + static site)
@@ -290,6 +292,24 @@ GitHub can't reach `localhost`, so a [smee.io](https://smee.io) channel relays d
 2. On the **dev** app: Webhook **Active**, URL = the smee channel, a secret of your choice, and subscribe to **Pull request**.
 3. Put the same secret in `backend/.env` as `GITHUB_WEBHOOK_SECRET`, and restart the backend.
 4. Run the relay: `npx smee-client --url https://smee.io/<channel> --target http://localhost:8080/api/webhooks/github`.
+
+---
+
+## Release notes
+
+**Releases** (also linked from each repo's page) drafts notes for everything merged since the last release:
+
+1. **Base.** The repo's latest published release, else its highest semver tag, else nothing (all merged PRs).
+2. **Changes.** PRs merged into the default branch after the base commit. The search API finds them, capped at 200.
+3. **Groups**, decided by the first rule that matches:
+   1. Dependabot or Renovate authors, or a `deps` scope, go to **Dependencies**.
+   2. Otherwise labels decide, e.g. `enhancement` → **Features**, `bug` → **Fixes**, `chore`/`ci`/`docs` → **Internal**.
+   3. Otherwise the title's conventional-commit prefix decides (`feat:`, `fix:`, `chore:`…).
+   4. Anything else goes to **Other changes**.
+4. **Version.** Breaking changes bump major (minor below 1.0): that means `!` after the prefix, `BREAKING CHANGE` in the body, or a breaking label. Features bump minor, and anything else bumps patch. The first release is `v0.1.0`. The tag's `v` style is kept.
+5. **Notes.** Each entry is the PR title with its link and author. With an API key, the AI writes a short intro and a one-line summary per PR, and the links and authors stay.
+
+You can edit the version and the notes, then **Create draft release**. That needs the repo's **Draft releases** switch (Settings → Repository automation, off by default) and uses a `contents: write` token limited to that repo. gitpulse **only ever creates drafts**: the tag isn't even created until you publish on GitHub. Drafts created are listed on the page, and recorded in `release_drafts`.
 
 ---
 

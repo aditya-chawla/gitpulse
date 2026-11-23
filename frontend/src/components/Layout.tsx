@@ -9,6 +9,7 @@ const nav = [
   { to: '/health', label: 'Repo health' },
   { to: '/digest', label: 'Digest' },
   { to: '/prs', label: 'Pull requests' },
+  { to: '/releases', label: 'Releases' },
   { to: '/settings', label: 'Settings' },
 ]
 

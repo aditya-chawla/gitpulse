@@ -329,3 +329,43 @@ export interface PRReview {
   createdAt: string
   updatedAt: string
 }
+
+export interface ReleaseItem {
+  number: number
+  title: string
+  url: string
+  author: string
+  labels: string[] | null
+  breaking: boolean
+  summary?: string
+  why: string
+}
+
+export interface ReleasePreview {
+  repoId: number
+  repo: string
+  defaultBranch: string
+  baseTag: string
+  baseSource: 'release' | 'tag' | ''
+  baseDate?: string
+  suggestedVersion: string
+  bump: 'major' | 'minor' | 'patch' | 'initial'
+  groups: { key: string; title: string; items: ReleaseItem[] }[]
+  count: number
+  truncated: boolean
+  intro?: string
+  markdown: string
+  compareUrl?: string
+  aiStatus: string
+  releasesEnabled: boolean
+}
+
+export interface ReleaseDraft {
+  id: number
+  repo: string
+  tag: string
+  baseTag?: string
+  url: string
+  source: 'ui' | 'mcp'
+  createdAt: string
+}

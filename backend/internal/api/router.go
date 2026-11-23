@@ -19,19 +19,21 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/llm"
 	"github.com/harshit3011/gitpulse/backend/internal/prreview"
+	"github.com/harshit3011/gitpulse/backend/internal/releases"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
 )
 
 type Deps struct {
-	Log     *slog.Logger
-	DB      *pgxpool.Pool
-	Store   *store.Store
-	Auth    *auth.Service
-	Install *install.Service
-	LLM     *llm.Service
-	PRs     *prreview.Service
+	Log      *slog.Logger
+	DB       *pgxpool.Pool
+	Store    *store.Store
+	Auth     *auth.Service
+	Install  *install.Service
+	LLM      *llm.Service
+	PRs      *prreview.Service
+	Releases *releases.Service
 	// WebhookSecret verifies GitHub deliveries; empty disables the webhook.
 	WebhookSecret string
 	Scanner       *scanner.Scanner
@@ -49,6 +51,7 @@ type handlers struct {
 	install    *install.Service
 	llm        *llm.Service
 	prs        *prreview.Service
+	releases   *releases.Service
 	webhookKey []byte
 	scanner    *scanner.Scanner
 	stats      *stats.Service
@@ -56,7 +59,7 @@ type handlers struct {
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, prs: d.PRs, webhookKey: []byte(d.WebhookSecret), scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
+	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, prs: d.PRs, releases: d.Releases, webhookKey: []byte(d.WebhookSecret), scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, requestLogger(d.Log), middleware.Recoverer)
 
@@ -106,6 +109,9 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/llm/usage", h.llmUsage)
 			r.Get("/prs", h.listPRs)
 			r.Get("/prs/{id:[0-9]+}", h.getPR)
+			r.Post("/repos/{id:[0-9]+}/release-notes/preview", h.releasePreview)
+			r.Post("/repos/{id:[0-9]+}/releases", h.createRelease)
+			r.Get("/releases/drafts", h.releaseDrafts)
 			r.Get("/repo-settings", h.listRepoSettings)
 			r.Put("/repo-settings/{id:[0-9]+}", h.putRepoSetting)
 		})

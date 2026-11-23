@@ -47,6 +47,7 @@ function Detail({ d, order }: { d: RepoDetail; order: string[] }) {
             {r.description && <p className="mt-1 max-w-2xl text-[14px] text-ink-2">{r.description}</p>}
             <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted">
               <a href={`https://github.com/${r.fullName}`} target="_blank" rel="noreferrer" className="text-accent hover:underline">{r.fullName} ↗</a>
+              <Link to={`/releases?repo=${r.id}`} className="text-accent hover:underline">Release notes</Link>
               <span>★ {num(r.stars)}</span><span>⑂ {num(r.forks)}</span>
               <span>Created {date(r.createdAt)}</span><span>Pushed {ago(r.pushedAt)}</span>
               <span>{bytes(r.sizeKb * 1024)}</span>{r.license && <span>{r.license}</span>}
