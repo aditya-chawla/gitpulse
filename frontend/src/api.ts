@@ -267,3 +267,24 @@ export interface ReposResponse {
   scan: ScanRef
   repos: RepoRow[]
 }
+
+export interface FeatureUsage {
+  feature: string
+  calls: number
+  cacheHits: number
+  skipped: number
+  failed: number
+  costUsd: number
+}
+
+export interface LLMUsage {
+  enabled: boolean
+  disabledReason?: string
+  provider?: string
+  model?: string
+  month: string
+  budgetUsd: number
+  spentUsd: number
+  capped: boolean
+  byFeature: FeatureUsage[]
+}

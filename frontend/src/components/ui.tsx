@@ -226,3 +226,19 @@ export function RepoLink({ id, name }: { id: number; name: string }) {
 export function Pill({ children }: { children: ReactNode }) {
   return <span className="rounded-full border border-line px-1.5 py-px text-[11px] text-muted">{children}</span>
 }
+
+/** Shown wherever an AI feature falls back to deterministic output. */
+export function AiOffNote({ reason, className = '' }: { reason?: 'disabled' | 'budget' | 'other'; className?: string }) {
+  const text =
+    reason === 'budget'
+      ? 'AI paused: this month’s LLM budget is used up. Showing the rule-based version.'
+      : reason === 'other'
+        ? 'AI summary unavailable for this one. Showing the rule-based version.'
+        : 'AI off — add an API key to enable summaries.'
+  return (
+    <p className={`inline-flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1 text-[12px] text-muted ${className}`}>
+      <svg aria-hidden="true" viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm0 3a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4Zm1 8H7V7h2v5Z" /></svg>
+      {text}
+    </p>
+  )
+}

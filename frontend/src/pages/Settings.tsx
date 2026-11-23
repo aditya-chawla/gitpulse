@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import {
-  api, ApiError, isNoData, type AppStatus, type NoData, type PRMode, type RepoSetting, type ReposResponse, type Settings,
+  api, ApiError, isNoData, type AppStatus, type LLMUsage, type NoData, type PRMode, type RepoSetting, type ReposResponse,
+  type Settings,
 } from '../api'
-import { Card, ErrorBox, Pill, Spinner } from '../components/ui'
+import { Card, ErrorBox, Pill, ScoreMeter, Spinner } from '../components/ui'
 import { useApi, useData } from '../data'
 
 // Mirrors Go's path.Match for the preview (*, ?, [...]), case-insensitive.
@@ -87,6 +88,7 @@ function Form({ initial, repos }: { initial: Settings; repos: ReposResponse['rep
 
       <AppCard />
       <AutomationCard />
+      <AiUsageCard />
 
       {/* The sticky save bar is scoped to this section: the cards above save immediately. */}
       <section className="space-y-5" aria-labelledby="dashboard-data">
@@ -285,6 +287,55 @@ function AutomationCard() {
             up to date on each PR. Draft releases: allows creating draft (never published) releases.
           </p>
         </>
+      )}
+    </Card>
+  )
+}
+
+const usd = (n: number) => `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`
+const featureNames: Record<string, string> = { pr_review: 'PR assistant', release_notes: 'Release notes' }
+
+function AiUsageCard() {
+  const { data, error, reload } = useApi<LLMUsage>('/api/llm/usage')
+  if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
+  const month = new Date(`${data.month}-01T00:00:00Z`).toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
+  return (
+    <Card title="AI usage" subtitle={`${month} (UTC). Every AI feature also works without AI, using rule-based output.`}>
+      {!data.enabled ? (
+        <div className="space-y-1 text-[14px] text-ink-2">
+          <p><b className="font-medium text-ink">AI disabled</b> ({data.disabledReason ?? 'no API key'}). Spent this month: {usd(data.spentUsd)}.</p>
+          <p className="text-[13px] text-muted">Set <code className="font-mono">ANTHROPIC_API_KEY</code> on the server to turn on AI summaries. The monthly budget is {usd(data.budgetUsd)}.</p>
+        </div>
+      ) : (
+        <div className="space-y-3 text-[14px] text-ink-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-ink"><b className="font-semibold">{usd(data.spentUsd)}</b> of {usd(data.budgetUsd)}</span>
+            <ScoreMeter score={Math.min(data.spentUsd, data.budgetUsd)} max={data.budgetUsd || 1} width="w-40" />
+            <span className="text-[13px] text-muted">{data.provider} · {data.model}</span>
+          </div>
+          {data.capped && (
+            <p role="status" className="text-[13px] text-critical">Budget reached: AI features are paused until next month and fall back to rule-based output.</p>
+          )}
+          {data.byFeature.length > 0 ? (
+            <table className="w-full max-w-lg text-left text-[13px] tabular">
+              <thead className="text-muted">
+                <tr><th className="py-1 font-medium">Feature</th><th className="py-1 font-medium">Calls</th><th className="py-1 font-medium">Cached</th><th className="py-1 font-medium">Skipped</th><th className="py-1 text-right font-medium">Cost</th></tr>
+              </thead>
+              <tbody>
+                {data.byFeature.map((f) => (
+                  <tr key={f.feature} className="border-t border-line">
+                    <td className="py-1">{featureNames[f.feature] ?? f.feature}</td>
+                    <td className="py-1">{f.calls}{f.failed > 0 && <span className="text-muted"> ({f.failed} failed)</span>}</td>
+                    <td className="py-1">{f.cacheHits}</td>
+                    <td className="py-1">{f.skipped}</td>
+                    <td className="py-1 text-right">{usd(f.costUsd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <p className="text-[13px] text-muted">No AI calls yet this month.</p>}
+        </div>
       )}
     </Card>
   )

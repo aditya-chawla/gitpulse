@@ -88,3 +88,13 @@ func (h *handlers) putRepoSetting(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, out)
 	}
 }
+
+// llmUsage reports AI status and this month's spend for the Settings page.
+func (h *handlers) llmUsage(w http.ResponseWriter, r *http.Request) {
+	u, err := h.llm.Usage(r.Context(), auth.UserFrom(r.Context()).ID)
+	if err != nil {
+		h.internal(w, "llm usage", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
+}

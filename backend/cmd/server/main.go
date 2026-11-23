@@ -11,12 +11,15 @@ import (
 	"time"
 	_ "time/tzdata" // distroless has no zoneinfo; user timezones need it
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/harshit3011/gitpulse/backend/internal/api"
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/config"
 	"github.com/harshit3011/gitpulse/backend/internal/db"
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/install"
+	"github.com/harshit3011/gitpulse/backend/internal/llm"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
@@ -59,6 +62,7 @@ func run() error {
 		FrontendURL: cfg.FrontendURL, CookieSecure: cfg.CookieSecure, CookieSameSite: cfg.CookieSameSite,
 	}, st, log)
 	installs := install.New(github.NewApp(cfg.GitHubClientID, cfg.GitHubAppKey), pool, log)
+	ai := newLLM(cfg.LLM, pool, log)
 
 	go sweepSessions(ctx, st, log)
 
@@ -74,7 +78,7 @@ func run() error {
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
 			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -105,6 +109,22 @@ func run() error {
 	// final status before the pool closes.
 	scn.Wait(10 * time.Second)
 	return err
+}
+
+// newLLM builds the AI service. With no key it is disabled and makes no calls.
+func newLLM(c config.LLMConfig, pool *pgxpool.Pool, log *slog.Logger) *llm.Service {
+	cfg := llm.Config{
+		MonthlyBudgetUSD: c.MonthlyBudgetUSD, MaxInputTokens: c.MaxInputTokens,
+		MaxOutputTokens: c.MaxOutputTokens, Price: c.Price, DisabledReason: c.DisabledReason,
+	}
+	var p llm.Provider
+	if c.Provider == "anthropic" {
+		p = llm.NewAnthropic(llm.AnthropicConfig{APIKey: c.AnthropicAPIKey, Model: c.Model, Effort: c.Effort})
+		log.Info("AI enabled", "provider", "anthropic", "model", c.Model, "budget_usd", c.MonthlyBudgetUSD)
+	} else {
+		log.Info("AI disabled; features use deterministic output", "reason", c.DisabledReason)
+	}
+	return llm.New(p, pool, cfg, log)
 }
 
 func sweepSessions(ctx context.Context, st *store.Store, log *slog.Logger) {

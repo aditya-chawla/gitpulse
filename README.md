@@ -17,6 +17,7 @@ backend/    Go 1.27 · chi · pgx · embedded SQL migrations
   internal/stats     dashboard queries + aggregations (unit-tested)
   internal/auth      sign-in via the GitHub App, allowlist, sessions
   internal/install   GitHub App installation lookup + scoped installation tokens
+  internal/llm       optional AI: provider interface, budget, cache, sanitising
 frontend/   React · TypeScript · Vite · Tailwind · Recharts
 .github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan)
 render.yaml         Render Blueprint (API + static site)
@@ -227,6 +228,40 @@ CI (`ci.yml`) needs no secrets.
 
 ---
 
+## AI (optional)
+
+gitpulse works fully without AI. Every AI feature has a rule-based fallback, and the UI shows a small "AI off" note where a summary would go. **No API key means no network calls, no errors, and $0.**
+
+To turn AI on later, set `ANTHROPIC_API_KEY` on the API service and redeploy. Nothing else is needed: with `LLM_PROVIDER` unset, the key's presence turns AI on.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | empty (AI off) | Anthropic API key |
+| `LLM_PROVIDER` | unset (auto) | `none` keeps AI off even with a key; `anthropic` forces it on when a key exists |
+| `LLM_MODEL` | `claude-haiku-5-5` | Model ID. Prices for Haiku/Sonnet/Opus 5.5 are built in. Other models need `LLM_PRICE_*` |
+| `LLM_EFFORT` | `low` | Sent as `output_config.effort`, only to models known to support it |
+| `LLM_MONTHLY_BUDGET_USD` | `5` | Hard monthly cap (UTC month); `0` never spends |
+| `LLM_MAX_INPUT_TOKENS` / `LLM_MAX_OUTPUT_TOKENS` | `24000` / `4000` | Per-request limits |
+| `LLM_PRICE_INPUT_PER_MTOK` / `LLM_PRICE_OUTPUT_PER_MTOK` | built in | Price override, USD per million tokens |
+
+**Cost controls** (all in `backend/internal/llm`):
+
+- **Budget cap with reservation.** Before each call, gitpulse takes a database lock and reserves the call's worst-case cost: estimated input plus the full output allowance. If that would push the month over the cap, it skips the call and uses the rule-based output. After the call, the reservation is replaced by the real cost from the API's reported usage. Scans and jobs never fail because of the cap.
+- **Content-hash cache.** The cache key is the provider, model, prompt version, prompt, input and schema, so the same input is never sent twice. Cache hits cost $0 and still work when the budget is used up.
+- **Size cap.** Inputs over `LLM_MAX_INPUT_TOKENS` are rejected before any call. Features trim their input to fit first. The 24k default stays well under Haiku 5.5's long-prompt tier, which charges more above 100k tokens.
+- **Every call is logged** in `llm_calls`: feature, repo, tokens, cost and outcome. **Settings → AI usage** shows the month's spend.
+
+Built-in prices were checked on 2026-11-23 against [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing). Haiku 5.5 is $0.10 input / $0.50 output per million tokens for prompts up to 100k tokens, and $0.50 / $2.50 above. `low` effort is supported on Haiku 5.5, whose default is `medium`.
+
+**Untrusted content.** PR titles, bodies, diffs and commit messages are written by other people. gitpulse treats them as untrusted:
+
+- **Fenced input.** The text goes in an `<untrusted>` block that the content can't close early. The system prompt tells the model to describe that block and ignore any instructions in it.
+- **No tools.** The model is given no tools, so it can only return JSON matching a schema.
+- **Cleaned output.** Before anything is displayed or posted, gitpulse removes links, images and HTML, neutralises `@mentions`, and caps the length.
+- **Labels.** Suggested labels are filtered in code against the repo's real labels.
+
+---
+
 ## Configuration reference
 
 Every backend variable is documented in [`backend/.env.example`](backend/.env.example), and the frontend's one build variable is in [`frontend/.env.example`](frontend/.env.example).
@@ -244,6 +279,7 @@ Every backend variable is documented in [`backend/.env.example`](backend/.env.ex
 | `COOKIE_SECURE` / `COOKIE_SAMESITE` | no | `true` / `lax` by default |
 | `STATIC_DIR` | no | Serve a built frontend from the Go server |
 | `PORT`, `LOG_LEVEL` | no | `8080`, `info` |
+| `ANTHROPIC_API_KEY`, `LLM_*` | no | Optional AI; see [AI (optional)](#ai-optional) |
 
 No secrets live in the repo: `.env` files are git-ignored, and production values live in Render and GitHub secrets.
 
