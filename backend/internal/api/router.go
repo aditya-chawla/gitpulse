@@ -18,23 +18,27 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/llm"
+	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
 )
 
 type Deps struct {
-	Log         *slog.Logger
-	DB          *pgxpool.Pool
-	Store       *store.Store
-	Auth        *auth.Service
-	Install     *install.Service
-	LLM         *llm.Service
-	Scanner     *scanner.Scanner
-	Stats       *stats.Service
-	ScanSecret  string
-	CORSOrigins []string
-	StaticDir   string
+	Log     *slog.Logger
+	DB      *pgxpool.Pool
+	Store   *store.Store
+	Auth    *auth.Service
+	Install *install.Service
+	LLM     *llm.Service
+	PRs     *prreview.Service
+	// WebhookSecret verifies GitHub deliveries; empty disables the webhook.
+	WebhookSecret string
+	Scanner       *scanner.Scanner
+	Stats         *stats.Service
+	ScanSecret    string
+	CORSOrigins   []string
+	StaticDir     string
 }
 
 type handlers struct {
@@ -44,13 +48,15 @@ type handlers struct {
 	auth       *auth.Service
 	install    *install.Service
 	llm        *llm.Service
+	prs        *prreview.Service
+	webhookKey []byte
 	scanner    *scanner.Scanner
 	stats      *stats.Service
 	scanSecret string
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
+	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, prs: d.PRs, webhookKey: []byte(d.WebhookSecret), scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, requestLogger(d.Log), middleware.Recoverer)
 
@@ -75,8 +81,12 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/auth/callback", d.Auth.Callback)
 		r.Post("/auth/logout", d.Auth.Logout)
 
+		// GitHub deliveries carry no Origin and are authenticated by signature.
+		r.Post("/webhooks/github", h.githubWebhook)
+
 		// Secret-or-session endpoints authenticate inside the handler.
 		r.Post("/scan", h.startScan)
+		r.Post("/prs/sync", h.syncPRs)
 		r.Get("/scans/{id:[0-9]+}", h.getScan)
 
 		r.Group(func(r chi.Router) {
@@ -94,6 +104,8 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Get("/app", h.appStatus)
 			r.Get("/llm/usage", h.llmUsage)
+			r.Get("/prs", h.listPRs)
+			r.Get("/prs/{id:[0-9]+}", h.getPR)
 			r.Get("/repo-settings", h.listRepoSettings)
 			r.Put("/repo-settings/{id:[0-9]+}", h.putRepoSetting)
 		})

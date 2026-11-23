@@ -8,6 +8,7 @@ const nav = [
   { to: '/', label: 'Analytics', end: true },
   { to: '/health', label: 'Repo health' },
   { to: '/digest', label: 'Digest' },
+  { to: '/prs', label: 'Pull requests' },
   { to: '/settings', label: 'Settings' },
 ]
 

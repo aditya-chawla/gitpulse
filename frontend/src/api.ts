@@ -288,3 +288,44 @@ export interface LLMUsage {
   capped: boolean
   byFeature: FeatureUsage[]
 }
+
+export interface PRFlag {
+  kind: string
+  title: string
+  files: string[]
+  extra: number
+}
+
+export interface PRReviewResult {
+  headSha: string
+  filesChanged: number
+  filesListed: number
+  additions: number
+  deletions: number
+  flags: PRFlag[]
+  omitted: { path: string; reason: string }[]
+  suggestedLabels: string[]
+  labelReasons: Record<string, string>
+  ai?: { summary: string; notable: string[] | null; suggestedTitle: string; suggestedLabels: string[] | null }
+}
+
+export interface PRReview {
+  id: number
+  repoId: number
+  repo: string
+  number: number
+  headSha: string
+  title: string
+  author: string
+  url: string
+  source: 'webhook' | 'sync' | 'manual'
+  status: 'pending' | 'running' | 'done' | 'skipped' | 'failed'
+  mode?: string
+  aiStatus?: string
+  skipReason?: string
+  error?: string
+  commentUrl?: string
+  result?: PRReviewResult | null
+  createdAt: string
+  updatedAt: string
+}

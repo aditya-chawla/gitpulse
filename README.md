@@ -5,6 +5,7 @@ A personal GitHub dashboard. It scans every repository you own and shows:
 - **Analytics**: language mix (overall and per repo), language trend by year, weekly commits, when you commit (day × hour, in your timezone), streaks, top repos by stars, forks and your commits, and the detected tech stack.
 - **Repo health**: a 0–100 score per repo with a visible breakdown (README, license, CI, tests, recent activity, stale branches, old PRs, description/topics), an active/slowing/dormant status, and a sortable, filterable table with a detail page per repo.
 - **Digest**: PRs waiting on you, new issues, failed workflow runs, and new stars/forks since the previous scan.
+- **PR assistant**: reviews each new commit on your open PRs (risky changes, label suggestions, optional AI summary), in the dashboard or as one self-updating PR comment.
 
 The dashboard reads only from Postgres. A **scan** fetches everything from GitHub and stores it as a snapshot, so you get trends over time. Scans run daily from GitHub Actions, or on demand from the **Scan now** button.
 
@@ -18,8 +19,9 @@ backend/    Go 1.27 · chi · pgx · embedded SQL migrations
   internal/auth      sign-in via the GitHub App, allowlist, sessions
   internal/install   GitHub App installation lookup + scoped installation tokens
   internal/llm       optional AI: provider interface, budget, cache, sanitising
+  internal/prreview  PR assistant: webhook/sync queue, rules, comment upsert
 frontend/   React · TypeScript · Vite · Tailwind · Recharts
-.github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan)
+.github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan) · pr-sync.yml (every 30 min)
 render.yaml         Render Blueprint (API + static site)
 docker-compose.yml  local Postgres + backend + frontend
 ```
@@ -94,7 +96,7 @@ Go to <https://github.com/settings/apps/new> and fill in:
 | Callback URL | `http://localhost:8080/api/auth/callback` | `https://<static-site-host>/api/auth/callback` |
 | Expire user authorization tokens | on (default) | on (default) |
 | Request user authorization (OAuth) during installation | off | off |
-| Webhook → Active | off for now (enabled with the PR assistant) | off for now (enabled with the PR assistant) |
+| Webhook → Active | see [webhook setup (local)](#webhook-setup-local-via-smeeio) | see [webhook setup (production)](#webhook-setup-production) |
 | Where can this GitHub App be installed? | Only on this account | Only on this account |
 
 The production callback goes through the **frontend** host. Render rewrites `/api/*` to the backend, so the session cookie belongs to the site you browse.
@@ -224,7 +226,70 @@ Free Render services sleep after 15 idle minutes, so the app has no in-process s
 | `GITPULSE_API_URL` | The API's public URL, e.g. `https://gitpulse-api.onrender.com` (no trailing slash). In the single-service fallback, the one service's URL. |
 | `SCAN_SECRET` | Copy the `SCAN_SECRET` value from the Render API service's Environment tab. |
 
-CI (`ci.yml`) needs no secrets.
+`pr-sync.yml` (the [PR assistant](#pr-assistant)'s 30-minute catch-up) uses the same two secrets. CI (`ci.yml`) needs no secrets.
+
+---
+
+## PR assistant
+
+Every new head commit of an open pull request in your repos is reviewed **once**. The idempotency key is repo + PR number + head SHA. Results show on the **Pull requests** page.
+
+**What a review contains** (no API key needed):
+
+- files changed, additions and deletions;
+- **notable changes** found by rules: database migrations, auth/session/security code, deployment/CI/config files, dependency manifests and lock files, deleted tests, files with over 500 changed lines, and binary files;
+- **suggested labels**, chosen only from labels that already exist in the repo. The rules use the PR title's conventional-commit prefix (`feat:` → enhancement, `fix:` → bug, …), commit prefixes when most commits agree, dependency bots, and paths (docs-only, tests-only, workflows-only, manifests-only, migrations);
+- **what was left out:**
+  - lock files, vendored code and generated/minified files;
+  - binary files and diffs GitHub won't show;
+  - files cut at 6,000 characters;
+  - files over the total size limit.
+
+With an API key, the review also gets an AI summary, more notable points and a suggested title. The AI's label picks are filtered the same way. See [AI (optional)](#ai-optional).
+
+**Per-repo modes** (Settings → Repository automation):
+
+| Mode | Behaviour |
+|---|---|
+| Off | Never reviewed. |
+| **Dashboard only** (default) | Reviewed and shown in gitpulse. Nothing is posted to GitHub. |
+| Comment on PR | Also keeps **one** comment on the PR, marked with `<!-- gitpulse:pr-review -->`, and edits it on each push instead of posting again. |
+
+gitpulse never changes PR titles or labels; it only suggests them. Comments are written with an installation token minted for that one repo, and that token has only the `pull_requests: write` permission.
+
+**How PRs arrive:**
+
+1. **Webhook** (`POST /api/webhooks/github`). GitHub sends `pull_request` events (opened, synchronize, reopened, ready_for_review):
+   - Each delivery is checked against `GITHUB_WEBHOOK_SECRET` (HMAC-SHA256, constant-time) before parsing.
+   - The request is queued in Postgres and answered `202` immediately.
+   - A background worker does the review.
+2. **Catch-up** (`POST /api/prs/sync`, `X-Scan-Secret` or a session). It queues every open PR whose head commit hasn't been reviewed yet.
+   - `.github/workflows/pr-sync.yml` calls it every 30 minutes and retries through cold starts. The free Render instance sleeps, and GitHub gives up on a webhook after 10 seconds, so deliveries can be missed.
+   - The **Check for new PRs** button on the Pull requests page does the same.
+
+Both paths are idempotent, so overlapping deliveries and syncs are harmless. Failed reviews are retried up to 3 times. A review whose commit was superseded by a newer push, or whose PR was closed, is marked skipped.
+
+Without `GITHUB_WEBHOOK_SECRET` the webhook endpoint answers `503` and only the catch-up runs. That works fine, but takes up to 30 minutes.
+
+### Webhook setup (production)
+
+1. Generate a secret: `openssl rand -hex 32`.
+2. GitHub App settings → **Webhook**:
+   - Tick **Active**.
+   - **Webhook URL:** `https://<api-host>/api/webhooks/github`. Use the API host directly, not the static site.
+   - **Webhook secret:** the value from step 1.
+3. **Permissions & events → Subscribe to events:** tick **Pull request**.
+4. Set `GITHUB_WEBHOOK_SECRET` on the Render API service to the same value.
+5. In the app's **Advanced** tab, **Recent Deliveries** shows each delivery and its response. A `202` means queued.
+
+### Webhook setup (local, via smee.io)
+
+GitHub can't reach `localhost`, so a [smee.io](https://smee.io) channel relays deliveries:
+
+1. <https://smee.io> → **Start a new channel**, and copy the URL.
+2. On the **dev** app: Webhook **Active**, URL = the smee channel, a secret of your choice, and subscribe to **Pull request**.
+3. Put the same secret in `backend/.env` as `GITHUB_WEBHOOK_SECRET`, and restart the backend.
+4. Run the relay: `npx smee-client --url https://smee.io/<channel> --target http://localhost:8080/api/webhooks/github`.
 
 ---
 
@@ -279,6 +344,7 @@ Every backend variable is documented in [`backend/.env.example`](backend/.env.ex
 | `COOKIE_SECURE` / `COOKIE_SAMESITE` | no | `true` / `lax` by default |
 | `STATIC_DIR` | no | Serve a built frontend from the Go server |
 | `PORT`, `LOG_LEVEL` | no | `8080`, `info` |
+| `GITHUB_WEBHOOK_SECRET` | no | Verifies webhook deliveries; without it only the 30-minute catch-up runs |
 | `ANTHROPIC_API_KEY`, `LLM_*` | no | Optional AI; see [AI (optional)](#ai-optional) |
 
 No secrets live in the repo: `.env` files are git-ignored, and production values live in Render and GitHub secrets.

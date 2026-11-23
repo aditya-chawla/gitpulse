@@ -12,6 +12,7 @@ const HealthPage = lazy(() => import('./pages/Health'))
 const RepoPage = lazy(() => import('./pages/Repo'))
 const DigestPage = lazy(() => import('./pages/Digest'))
 const SettingsPage = lazy(() => import('./pages/Settings'))
+const PRsPage = lazy(() => import('./pages/PRs'))
 
 const page = (el: ReactNode) => <Suspense fallback={<Spinner />}>{el}</Suspense>
 
@@ -54,6 +55,7 @@ export default function App() {
         <Route path="health" element={page(<HealthPage />)} />
         <Route path="repos/:id" element={page(<RepoPage />)} />
         <Route path="digest" element={page(<DigestPage />)} />
+        <Route path="prs" element={page(<PRsPage />)} />
         <Route path="settings" element={page(<SettingsPage />)} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

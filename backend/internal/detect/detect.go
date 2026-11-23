@@ -330,3 +330,21 @@ func containsWord(text, word string) bool {
 	re := regexp.MustCompile(`(^|[^A-Za-z0-9_-])` + regexp.QuoteMeta(word) + `($|[^A-Za-z0-9_-])`)
 	return re.MatchString(text)
 }
+
+// IsTestFile reports whether a repo path is a test file: a test-named file,
+// or any file under a test directory.
+func IsTestFile(p string) bool {
+	segs := strings.Split(p, "/")
+	if testFile.MatchString(segs[len(segs)-1]) {
+		return true
+	}
+	for _, s := range segs[:len(segs)-1] {
+		if testDirs[strings.ToLower(s)] {
+			return true
+		}
+	}
+	return false
+}
+
+// IsManifest reports whether a file name is a dependency manifest.
+func IsManifest(name string) bool { return parseable[name] }

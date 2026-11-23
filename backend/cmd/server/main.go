@@ -20,6 +20,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/llm"
+	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
@@ -63,6 +64,11 @@ func run() error {
 	}, st, log)
 	installs := install.New(github.NewApp(cfg.GitHubClientID, cfg.GitHubAppKey), pool, log)
 	ai := newLLM(cfg.LLM, pool, log)
+	prs := prreview.New(pool, st, prAccess{installs, log}, ai, log)
+	prs.Start(ctx)
+	if cfg.WebhookSecret == "" {
+		log.Info("GITHUB_WEBHOOK_SECRET not set: webhooks disabled; PRs are picked up by /api/prs/sync")
+	}
 
 	go sweepSessions(ctx, st, log)
 
@@ -78,7 +84,7 @@ func run() error {
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, PRs: prs, WebhookSecret: cfg.WebhookSecret, Scanner: scn, Stats: stats.NewService(pool), ScanSecret: cfg.ScanSecret,
 			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -108,8 +114,30 @@ func run() error {
 	// ctx is cancelled, so running scans are stopping; let them record their
 	// final status before the pool closes.
 	scn.Wait(10 * time.Second)
+	prs.Wait(10 * time.Second)
 	return err
 }
+
+// prAccess gives the PR assistant read-only clients for all repos, and a
+// comment-only token scoped to one repo for writes.
+type prAccess struct {
+	inst *install.Service
+	log  *slog.Logger
+}
+
+func (a prAccess) Read(ctx context.Context, u *store.User) (prreview.GitHub, error) {
+	return a.inst.ReadClient(ctx, u, github.WithLogger(a.log))
+}
+
+func (a prAccess) Writer(ctx context.Context, u *store.User, repoID int64) (prreview.Commenter, error) {
+	tok, err := a.inst.RepoToken(ctx, u, repoID, map[string]string{"pull_requests": "write"})
+	if err != nil {
+		return nil, err
+	}
+	return github.New(tok, github.WithLogger(a.log)), nil
+}
+
+func (a prAccess) BotLogin(ctx context.Context) (string, error) { return a.inst.BotLogin(ctx) }
 
 // newLLM builds the AI service. With no key it is disabled and makes no calls.
 func newLLM(c config.LLMConfig, pool *pgxpool.Pool, log *slog.Logger) *llm.Service {

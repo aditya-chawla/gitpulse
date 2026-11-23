@@ -1,0 +1,57 @@
+name: PR sync
+
+# Catch-up for the PR assistant. Webhooks can be missed while the free Render
+# instance sleeps (GitHub gives up after 10 s); this queues every open PR
+# whose head commit hasn't been reviewed yet. Idempotent: already-reviewed
+# commits are skipped, so overlapping with webhooks is harmless.
+
+on:
+  schedule:
+    - cron: "7,37 * * * *" # every 30 minutes, off the hour
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pr-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      API_URL: ${{ secrets.GITPULSE_API_URL }}
+      SCAN_SECRET: ${{ secrets.SCAN_SECRET }}
+    steps:
+      - name: Check configuration
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$SCAN_SECRET" ]; then
+            echo "::error::Set the GITPULSE_API_URL and SCAN_SECRET repository secrets."
+            exit 1
+          fi
+
+      - name: Wake the backend (cold start can take a minute or more)
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 60 "$API_URL/healthz" >/dev/null; then
+              echo "Backend is up (attempt $i)"; exit 0
+            fi
+            echo "Not up yet (attempt $i), retrying in 15s"; sleep 15
+          done
+          echo "::error::Backend did not respond within ~15 minutes"; exit 1
+
+      - name: Queue unreviewed PRs
+        run: |
+          for i in $(seq 1 5); do
+            code=$(curl -sS --max-time 60 -o resp.json -w '%{http_code}' -X POST \
+              -H "X-Scan-Secret: $SCAN_SECRET" "$API_URL/api/prs/sync" || echo 000)
+            if [ "$code" = "200" ]; then
+              jq -r '.users[] | "user \(.userId): \(.reposChecked) repos, \(.openPrs) open PRs, \(.queued) queued, \(.alreadyReviewed) already reviewed, \(.errors) errors"' resp.json
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $code $(cat resp.json 2>/dev/null)"
+            case "$code" in 401) exit 1 ;; esac   # bad secret: retrying won't help
+            sleep 20
+          done
+          exit 1

@@ -114,7 +114,7 @@ func (s *Service) active(ctx context.Context, userID int64) (*github.Installatio
 
 // ReadClient returns a client limited to read permissions on every repo the
 // installation covers. Scans use this.
-func (s *Service) ReadClient(ctx context.Context, u *store.User, opts ...github.Option) (github.Client, error) {
+func (s *Service) ReadClient(ctx context.Context, u *store.User, opts ...github.Option) (*github.HTTPClient, error) {
 	in, err := s.active(ctx, u.ID)
 	if err != nil {
 		return nil, err
@@ -136,4 +136,13 @@ func (s *Service) RepoToken(ctx context.Context, u *store.User, repoID int64, pe
 		return "", &MissingPermissionsError{Missing: missing}
 	}
 	return s.app.InstallationToken(ctx, in.ID, github.TokenRequest{RepositoryIDs: []int64{repoID}, Permissions: perms})
+}
+
+// BotLogin is the app's bot account, which authors its comments.
+func (s *Service) BotLogin(ctx context.Context) (string, error) {
+	info, err := s.app.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Slug + "[bot]", nil
 }

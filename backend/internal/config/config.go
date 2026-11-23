@@ -24,12 +24,15 @@ type Config struct {
 	OAuthRedirectURL   string
 	AllowedUsers       map[string]bool // lower-cased logins
 	ScanSecret         string
-	FrontendURL        string   // where the browser lands after login/logout
-	CORSOrigins        []string // extra origins allowed to call the API with credentials
-	CookieSecure       bool
-	CookieSameSite     http.SameSite
-	StaticDir          string // optional: serve built frontend from here
-	LogLevel           slog.Level
+	// WebhookSecret verifies GitHub webhook deliveries. Optional: without it
+	// the webhook endpoint answers 503 and the catch-up sync still works.
+	WebhookSecret  string
+	FrontendURL    string   // where the browser lands after login/logout
+	CORSOrigins    []string // extra origins allowed to call the API with credentials
+	CookieSecure   bool
+	CookieSameSite http.SameSite
+	StaticDir      string // optional: serve built frontend from here
+	LogLevel       slog.Level
 
 	LLM LLMConfig
 }
@@ -71,6 +74,7 @@ func Load() (*Config, error) {
 		GitHubClientSecret: req("GITHUB_CLIENT_SECRET"),
 		OAuthRedirectURL:   req("OAUTH_REDIRECT_URL"),
 		ScanSecret:         req("SCAN_SECRET"),
+		WebhookSecret:      opt("GITHUB_WEBHOOK_SECRET", ""),
 		FrontendURL:        strings.TrimRight(opt("FRONTEND_URL", "/"), "/"),
 		CookieSecure:       opt("COOKIE_SECURE", "true") != "false",
 		StaticDir:          opt("STATIC_DIR", ""),
