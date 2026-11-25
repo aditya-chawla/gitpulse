@@ -23,3 +23,8 @@ frontend/dist/
 # misc
 .DS_Store
 *.log
+.neon
+node_modules/
+/neon.ts
+/package.json
+/package-lock.json

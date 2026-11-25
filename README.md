@@ -2,6 +2,9 @@
 
 A **Repository Intelligence, Maintenance & Open-Source Explorer Dashboard** built on a snapshot-first PostgreSQL 17 architecture.
 
+> **Try Live Demo (Read-Only):** <https://gitpulse-nlle.onrender.com/?demo=1>  
+> **Hosted App:** <https://gitpulse-nlle.onrender.com/> *(no sign-in needed in Demo Mode — explores both `My Repos` and `OSS Explorer` with Postgres Data Science insights and the `Ask AI ✦` advisor)*
+
 ### What It Does
 
 1. **Two-Mode Workspace (`My Repos` | `OSS Explorer`):**
