@@ -2,6 +2,15 @@
 .env
 *.env
 !.env.example
+*.pem
+*.key
+
+# local agent & planning files
+.agent/
+rules.md
+AGENT.md
+implementation_plan.md
+workflows/
 
 # go
 backend/bin/

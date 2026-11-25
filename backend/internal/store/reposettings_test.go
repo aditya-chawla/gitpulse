@@ -69,3 +69,24 @@ func TestRepoSettingsDefaultOffAndOwnerOnly(t *testing.T) {
 		t.Fatalf("list = %+v", list)
 	}
 }
+
+func TestWatchedRepoReadOnly(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if err := st.UpsertUser(ctx, User{ID: 1, NodeID: "U1", Login: "me"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.Exec(ctx, `INSERT INTO repos (id, user_id, full_name, source) VALUES (99, 1, 'torvalds/linux', 'watched')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.RepoSettingFor(ctx, 1, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "watched" || got.PRMode != PRModeOff || got.ReleasesEnabled {
+		t.Fatalf("watched repo must default to off/false: %+v", got)
+	}
+	if _, err := st.SaveRepoSetting(ctx, 1, RepoSetting{RepoID: 99, PRMode: PRModeComment, ReleasesEnabled: true}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("saving watched repo setting: err = %v, want ErrInvalid", err)
+	}
+}

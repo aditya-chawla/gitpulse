@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import type { Status } from '../api'
+import type { Direction, Status } from '../api'
 import { scoreColor } from '../colors'
 
 export function Card({ title, subtitle, actions, children, className = '' }: {
@@ -126,6 +126,28 @@ export function StatusBadge({ status }: { status: Status }) {
         {s.icon}
       </svg>
       {s.label}
+    </span>
+  )
+}
+
+const trendStyle: Record<Direction, { symbol: string; color: string; label: string }> = {
+  improving: { symbol: '▲', color: 'var(--status-good)', label: 'Improving' },
+  steady: { symbol: '—', color: 'var(--status-neutral)', label: 'Steady' },
+  slipping: { symbol: '▼', color: 'var(--status-warning)', label: 'Slipping' },
+}
+
+export function TrendBadge({ direction, showLabel = false }: { direction?: Direction; showLabel?: boolean }) {
+  const d = direction ?? 'steady'
+  const s = trendStyle[d]
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[12px] font-medium"
+      style={{ color: s.color }}
+      title={`30-day trend: ${s.label}`}
+      aria-label={`Trend: ${s.label}`}
+    >
+      <span aria-hidden>{s.symbol}</span>
+      {showLabel && <span>{s.label}</span>}
     </span>
   )
 }

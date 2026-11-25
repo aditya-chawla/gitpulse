@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   api, ApiError, isNoData, type AppStatus, type LLMUsage, type NoData, type PRMode, type ProfilePreview, type ProfileRun,
-  type ProfileSettings, type RepoSetting, type ReposResponse, type Settings,
+  type ProfileSettings, type RepoSetting, type ReposResponse, type Settings, type WatchedRepo,
 } from '../api'
 import { Card, ErrorBox, Pill, ScoreMeter, Spinner } from '../components/ui'
 import { useApi, useData } from '../data'
@@ -38,7 +38,7 @@ const zones: string[] = (() => {
 
 export default function SettingsPage() {
   const s = useApi<Settings>('/api/settings')
-  const r = useApi<ReposResponse | NoData>('/api/repos')
+  const r = useApi<ReposResponse | NoData>('/api/repos?source=owned')
   if (s.error) return <ErrorBox error={s.error} onRetry={s.reload} />
   if (!s.data || !r.data) return <Spinner />
   return <Form initial={s.data} repos={isNoData(r.data) ? [] : r.data.repos} />
@@ -88,6 +88,7 @@ function Form({ initial, repos }: { initial: Settings; repos: ReposResponse['rep
       <h1 className="text-xl font-semibold text-ink">Settings</h1>
 
       <AppCard />
+      <WatchlistCard />
       <AutomationCard />
       <ProfileReadmeCard />
       <AiUsageCard />
@@ -197,6 +198,103 @@ function AppCard() {
   )
 }
 
+function WatchlistCard() {
+  const { invalidate } = useData()
+  const q = useApi<{ repos: WatchedRepo[] }>('/api/watchlist')
+  const [input, setInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string }>()
+
+  if (q.error) return <ErrorBox error={q.error} onRetry={q.reload} />
+  if (!q.data) return null
+
+  const add = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!input.trim()) return
+    setBusy(true)
+    setMsg(undefined)
+    try {
+      const added = await api<WatchedRepo>('/api/watchlist', {
+        method: 'POST',
+        body: JSON.stringify({ repo: input.trim() }),
+      })
+      setInput('')
+      setMsg({ ok: true, text: `Added ${added.fullName}. It will be scanned on the next scan.` })
+      q.reload()
+      invalidate()
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Failed to add repository' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (w: WatchedRepo) => {
+    setBusy(true)
+    setMsg(undefined)
+    try {
+      await api(`/api/watchlist/${w.id}`, { method: 'DELETE' })
+      setMsg({ ok: true, text: `Removed ${w.fullName}.` })
+      q.reload()
+      invalidate()
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Failed to remove repository' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card
+      title="Watched repositories"
+      subtitle="Track any public owner/repo alongside your own repositories. Watched repos are read-only; PR reviews and draft releases are disabled."
+    >
+      <form onSubmit={add} className="flex flex-wrap items-center gap-2 text-[13px]">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="owner/repo or https://github.com/owner/repo"
+          aria-label="Repository to watch"
+          className="min-w-64 flex-1 rounded-lg border border-line bg-surface-2 px-3 py-1.5 text-ink placeholder:text-muted"
+        />
+        <button
+          type="submit"
+          disabled={busy || !input.trim()}
+          className="rounded-lg bg-accent px-3.5 py-1.5 font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? 'Adding…' : 'Add'}
+        </button>
+      </form>
+      {msg && <p role="status" className={`mt-2 text-[13px] ${msg.ok ? 'text-good-text' : 'text-critical'}`}>{msg.text}</p>}
+      {q.data.repos.length === 0 ? (
+        <p className="mt-3 text-[13px] text-muted">No watched repositories yet.</p>
+      ) : (
+        <ul className="mt-3 divide-y divide-line text-[13px]">
+          {q.data.repos.map((w) => (
+            <li key={w.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+              <div className="min-w-0">
+                <a href={`https://github.com/${w.fullName}`} target="_blank" rel="noreferrer" className="font-medium text-ink hover:text-accent hover:underline">
+                  {w.fullName} ↗
+                </a>
+                <span className="ml-2 text-[12px] text-muted">added {ago(w.addedAt)}</span>
+                {w.lastError && <p className="mt-0.5 text-[12px] text-critical">Last scan error: {w.lastError}</p>}
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => remove(w)}
+                className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-muted hover:text-ink disabled:opacity-50"
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  )
+}
+
 const modeLabels: Record<PRMode, string> = { off: 'Off', dashboard: 'Dashboard only', comment: 'Comment on PR' }
 
 function AutomationCard() {
@@ -262,19 +360,20 @@ function AutomationCard() {
                   <tr key={r.repoId} className="border-t border-line">
                     <td className="py-1.5 pr-3 text-ink-2">
                       <span className="mr-2 break-all">{r.fullName}</span>
+                      {r.source === 'watched' && <Pill>watched · read-only</Pill>}
                       {r.visibility === 'private' && <Pill>private</Pill>}
                       {r.isArchived && <Pill>archived</Pill>}
                     </td>
                     <td className="py-1.5 pr-3">
-                      <select value={r.prMode} disabled={busy === r.repoId} aria-label={`PR assistant for ${r.fullName}`}
+                      <select value={r.prMode} disabled={busy === r.repoId || r.source === 'watched'} aria-label={`PR assistant for ${r.fullName}`}
                         onChange={(e) => update(r, { prMode: e.target.value as PRMode })}
-                        className="rounded-md border border-line bg-surface-2 px-2 py-1 text-ink">
+                        className="rounded-md border border-line bg-surface-2 px-2 py-1 text-ink disabled:opacity-50">
                         {(Object.keys(modeLabels) as PRMode[]).map((m) => <option key={m} value={m}>{modeLabels[m]}</option>)}
                       </select>
                     </td>
                     <td className="py-1.5">
                       <label className="flex items-center gap-2 text-ink-2">
-                        <input type="checkbox" checked={r.releasesEnabled} disabled={busy === r.repoId}
+                        <input type="checkbox" checked={r.releasesEnabled} disabled={busy === r.repoId || r.source === 'watched'}
                           onChange={(e) => update(r, { releasesEnabled: e.target.checked })} />
                         {r.releasesEnabled ? 'Allowed' : 'Off'}
                       </label>

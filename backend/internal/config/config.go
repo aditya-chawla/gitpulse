@@ -30,6 +30,9 @@ type Config struct {
 	// ProfileReadmeRepo overrides the profile repo (default <login>/<login>);
 	// point it at a sandbox repo for local testing.
 	ProfileReadmeRepo string
+	// GitHubPublicToken is an optional PAT used to scan public watched repos
+	// when no GitHub App installation token is available (5,000 req/hr vs 60).
+	GitHubPublicToken string
 
 	// MCP: the /mcp endpoint is enabled only when MCPToken is set. It acts
 	// as MCPUser; draft_release_notes exists only with MCPAllowWrites.
@@ -85,6 +88,7 @@ func Load() (*Config, error) {
 		ScanSecret:         req("SCAN_SECRET"),
 		WebhookSecret:      opt("GITHUB_WEBHOOK_SECRET", ""),
 		ProfileReadmeRepo:  opt("PROFILE_README_REPO", ""),
+		GitHubPublicToken:  opt("GITHUB_PUBLIC_TOKEN", ""),
 		MCPToken:           opt("MCP_TOKEN", ""),
 		MCPUser:            strings.ToLower(opt("MCP_USER", "")),
 		MCPAllowWrites:     strings.EqualFold(opt("MCP_ALLOW_WRITES", "false"), "true"),

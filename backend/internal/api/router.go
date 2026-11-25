@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/harshit3011/gitpulse/backend/internal/advisor"
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/install"
 	"github.com/harshit3011/gitpulse/backend/internal/llm"
@@ -24,6 +25,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
+	"github.com/harshit3011/gitpulse/backend/internal/watchlist"
 )
 
 type Deps struct {
@@ -42,6 +44,8 @@ type Deps struct {
 	WebhookSecret string
 	Scanner       *scanner.Scanner
 	Stats         *stats.Service
+	Advisor       *advisor.Service
+	Watchlist     *watchlist.Service
 	ScanSecret    string
 	CORSOrigins   []string
 	StaticDir     string
@@ -60,11 +64,17 @@ type handlers struct {
 	webhookKey []byte
 	scanner    *scanner.Scanner
 	stats      *stats.Service
+	advisor    *advisor.Service
+	watchlist  *watchlist.Service
 	scanSecret string
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, prs: d.PRs, releases: d.Releases, profile: d.Profile, webhookKey: []byte(d.WebhookSecret), scanner: d.Scanner, stats: d.Stats, scanSecret: d.ScanSecret}
+	adv := d.Advisor
+	if adv == nil && d.Stats != nil {
+		adv = advisor.New(d.Stats)
+	}
+	h := &handlers{log: d.Log, db: d.DB, store: d.Store, auth: d.Auth, install: d.Install, llm: d.LLM, prs: d.PRs, releases: d.Releases, profile: d.Profile, webhookKey: []byte(d.WebhookSecret), scanner: d.Scanner, stats: d.Stats, advisor: adv, watchlist: d.Watchlist, scanSecret: d.ScanSecret}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, requestLogger(d.Log), middleware.Recoverer)
 
@@ -114,6 +124,13 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/repos", h.repos)
 			r.Get("/repos/{id:[0-9]+}", h.repo)
 			r.Get("/digest", h.digest)
+			r.Get("/trends", h.trendsOverview)
+			r.Get("/trends/{repoId:[0-9]+}", h.repoTrend)
+			r.Get("/insights", h.listInsights)
+			r.Get("/insights/{repoId:[0-9]+}", h.repoInsights)
+			r.Post("/agent/ask", h.askAgent)
+			r.Get("/actions", h.listActions)
+			r.Post("/actions/{id:[0-9]+}/dismiss", h.dismissAction)
 			r.Get("/settings", h.getSettings)
 			r.Put("/settings", h.putSettings)
 
@@ -129,6 +146,9 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/profile-readme/preview", h.profilePreview)
 			r.Get("/repo-settings", h.listRepoSettings)
 			r.Put("/repo-settings/{id:[0-9]+}", h.putRepoSetting)
+			r.Get("/watchlist", h.listWatchlist)
+			r.Post("/watchlist", h.addWatchlist)
+			r.Delete("/watchlist/{id:[0-9]+}", h.removeWatchlist)
 		})
 
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {

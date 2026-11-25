@@ -232,7 +232,9 @@ func (c *HTTPClient) once(ctx context.Context, method, url string, body []byte, 
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("github token: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")

@@ -41,7 +41,7 @@ func (h *handlers) analytics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) repos(w http.ResponseWriter, r *http.Request) {
-	v, err := h.stats.Repos(r.Context(), auth.UserFrom(r.Context()).ID)
+	v, err := h.stats.ReposForSource(r.Context(), auth.UserFrom(r.Context()).ID, r.URL.Query().Get("source"))
 	h.respond(w, v, err)
 }
 

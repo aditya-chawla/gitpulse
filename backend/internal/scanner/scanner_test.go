@@ -19,10 +19,12 @@ import (
 type fakeGH struct {
 	viewer   github.Viewer
 	repos    []github.Repo
+	public   map[github.RepoRef]github.Repo
 	trees    map[github.RepoRef][]github.TreeEntry
 	files    map[github.FileRef]string
 	weeks    []github.CommitWeek
 	commits  map[github.RepoRef][]github.Commit
+	authors  map[github.RepoRef][]github.CommitAuthor
 	runs     []github.WorkflowRun
 	sinceArg map[github.RepoRef]time.Time
 }
@@ -30,6 +32,13 @@ type fakeGH struct {
 func (f *fakeGH) User(context.Context, string) (*github.Viewer, error) { v := f.viewer; return &v, nil }
 func (f *fakeGH) OwnedRepos(context.Context, string) ([]github.Repo, error) {
 	return f.repos, nil
+}
+func (f *fakeGH) PublicRepo(_ context.Context, owner, name string, _ bool) (*github.Repo, error) {
+	ref := github.RepoRef{Owner: owner, Name: name}
+	if r, ok := f.public[ref]; ok {
+		return &r, nil
+	}
+	return nil, &github.APIError{Status: 404, URL: "/repos/" + ref.String(), Body: "not found"}
 }
 func (f *fakeGH) Trees(_ context.Context, refs []github.RepoRef, _ int) (map[github.RepoRef][]github.TreeEntry, error) {
 	out := map[github.RepoRef][]github.TreeEntry{}
@@ -58,6 +67,9 @@ func (f *fakeGH) CommitsBy(_ context.Context, r github.RepoRef, _ string, since 
 }
 func (f *fakeGH) FailedRuns(context.Context, github.RepoRef, time.Time) ([]github.WorkflowRun, error) {
 	return f.runs, nil
+}
+func (f *fakeGH) RecentCommitAuthors(_ context.Context, r github.RepoRef, _ time.Time, _ int) ([]github.CommitAuthor, error) {
+	return f.authors[r], nil
 }
 func (f *fakeGH) Rate() github.RateInfo { return github.RateInfo{Calls: 7, GraphQLRemaining: 4990} }
 
@@ -201,5 +213,144 @@ func TestConcurrentStartReturnsExisting(t *testing.T) {
 	}
 	if n, _ := RecoverStale(ctx, pool); n != 1 {
 		t.Fatalf("recovered %d", n)
+	}
+}
+
+func TestScanWatchedRepos(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	st := store.New(pool)
+	_ = st.UpsertUser(ctx, store.User{ID: 3, NodeID: "U_3", Login: "me"})
+	if _, err := pool.Exec(ctx, `INSERT INTO watched_repos (user_id, owner, name) VALUES (3, 'torvalds', 'linux')`); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	linuxRef := github.RepoRef{Owner: "torvalds", Name: "linux"}
+	fake := &fakeGH{
+		viewer: github.Viewer{ID: 3, NodeID: "U_3", Login: "me"},
+		public: map[github.RepoRef]github.Repo{
+			linuxRef: {
+				ID: 2325298, Ref: linuxRef, Visibility: "public", DefaultBranch: "master",
+				Stars: 190000, CreatedAt: now.AddDate(-10, 0, 0), PushedAt: &now,
+				Languages: []github.LanguageBytes{{Language: "C", Bytes: 1000000}},
+			},
+		},
+		trees:    map[github.RepoRef][]github.TreeEntry{linuxRef: {{Path: "README"}, {Path: "COPYING"}}},
+		files:    map[github.FileRef]string{},
+		sinceArg: map[github.RepoRef]time.Time{},
+	}
+
+	s := New(ctx, pool, st, func(context.Context, *store.User, github.Cache) (github.Client, error) {
+		return fake, nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.now = func() time.Time { return now }
+
+	id, _, err := s.Start(ctx, 3, "ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		sc, err := GetScan(ctx, pool, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Status == "succeeded" {
+			break
+		}
+		if sc.Status == "failed" {
+			t.Fatalf("scan failed: %s", sc.Error)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	var source string
+	var ghID int64
+	if err := pool.QueryRow(ctx, `SELECT source, id FROM repos WHERE user_id = 3 AND full_name = 'torvalds/linux'`).Scan(&source, &ghID); err != nil {
+		t.Fatal(err)
+	}
+	if source != "watched" || ghID != 2325298 {
+		t.Fatalf("got source=%q id=%d", source, ghID)
+	}
+}
+
+func TestTrendSnapshotsAndDismissal(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	st := store.New(pool)
+	_ = st.UpsertUser(ctx, store.User{ID: 4, NodeID: "U_4", Login: "me"})
+
+	day1 := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	day2 := day1.Add(24 * time.Hour)
+	app := github.RepoRef{Owner: "me", Name: "app"}
+	fake := &fakeGH{
+		viewer: github.Viewer{ID: 4, NodeID: "U_4", Login: "me"},
+		repos: []github.Repo{{
+			ID: 100, Ref: app, Visibility: "public", DefaultBranch: "main",
+			CreatedAt: day1.AddDate(-1, 0, 0), PushedAt: &day1,
+		}},
+		trees:    map[github.RepoRef][]github.TreeEntry{app: {{Path: ".github/workflows/ci.yml"}}},
+		files:    map[github.FileRef]string{},
+		runs:     []github.WorkflowRun{{ID: 1, Name: "CI", Branch: "main", Conclusion: "failure", URL: "https://github.com/me/app/actions/runs/1", CreatedAt: day1}},
+		sinceArg: map[github.RepoRef]time.Time{},
+	}
+
+	curNow := day1
+	s := New(ctx, pool, st, func(context.Context, *store.User, github.Cache) (github.Client, error) {
+		return fake, nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.now = func() time.Time { return curNow }
+
+	waitScan := func() {
+		id, _, err := s.Start(ctx, 4, "ui")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 100 {
+			sc, err := GetScan(ctx, pool, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sc.Status == "succeeded" {
+				return
+			}
+			if sc.Status == "failed" {
+				t.Fatalf("scan failed: %s", sc.Error)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatal("scan timed out")
+	}
+
+	// Scan 1: ci_rot does not fire yet (only 1 scan).
+	waitScan()
+	var activeCount int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM action_items WHERE user_id = 4 AND rule = 'ci_rot' AND active = true`).Scan(&activeCount)
+	if activeCount != 0 {
+		t.Fatalf("expected 0 ci_rot after 1 scan, got %d", activeCount)
+	}
+
+	// Scan 2 (next day, still failing): ci_rot fires.
+	curNow = day2
+	waitScan()
+	var itemID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM action_items WHERE user_id = 4 AND rule = 'ci_rot' AND active = true`).Scan(&itemID); err != nil {
+		t.Fatalf("expected ci_rot after 2nd scan: %v", err)
+	}
+
+	// Dismiss the alert and run Scan 3: dismissed must stay true.
+	if _, err := pool.Exec(ctx, `UPDATE action_items SET dismissed = true WHERE id = $1`, itemID); err != nil {
+		t.Fatal(err)
+	}
+	curNow = day2.Add(24 * time.Hour)
+	waitScan()
+	var dismissed bool
+	var active bool
+	if err := pool.QueryRow(ctx, `SELECT dismissed, active FROM action_items WHERE id = $1`, itemID).Scan(&dismissed, &active); err != nil {
+		t.Fatal(err)
+	}
+	if !dismissed || !active {
+		t.Fatalf("expected dismissed=true active=true after rescan, got dismissed=%v active=%v", dismissed, active)
 	}
 }

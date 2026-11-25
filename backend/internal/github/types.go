@@ -15,6 +15,10 @@ type Client interface {
 	// forks. (Stargazer lists are not readable with installation tokens, so
 	// only star counts are collected.)
 	OwnedRepos(ctx context.Context, login string) ([]Repo, error)
+	// PublicRepo fetches a single public repository by owner/name. When
+	// useGraphQL is true it uses GraphQL (richer data in 1 call); otherwise
+	// it falls back to unauthenticated REST.
+	PublicRepo(ctx context.Context, owner, name string, useGraphQL bool) (*Repo, error)
 	// Trees returns each repo's file tree at HEAD down to `depth` levels.
 	// Empty repos are absent from the map.
 	Trees(ctx context.Context, repos []RepoRef, depth int) (map[RepoRef][]TreeEntry, error)
@@ -27,6 +31,8 @@ type Client interface {
 	CommitsBy(ctx context.Context, repo RepoRef, authorNodeID string, since time.Time) ([]Commit, error)
 	// FailedRuns lists failed Actions workflow runs created since t.
 	FailedRuns(ctx context.Context, repo RepoRef, since time.Time) ([]WorkflowRun, error)
+	// RecentCommitAuthors returns up to max recent commits (capped at 100) since t.
+	RecentCommitAuthors(ctx context.Context, repo RepoRef, since time.Time, max int) ([]CommitAuthor, error)
 	Rate() RateInfo
 }
 
@@ -119,6 +125,11 @@ type Commit struct {
 	AuthoredAt time.Time
 	Additions  int
 	Deletions  int
+}
+
+type CommitAuthor struct {
+	Login string
+	At    time.Time
 }
 
 type WorkflowRun struct {

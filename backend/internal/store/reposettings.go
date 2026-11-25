@@ -19,6 +19,7 @@ const (
 type RepoSetting struct {
 	RepoID          int64  `json:"repoId"`
 	FullName        string `json:"fullName"`
+	Source          string `json:"source"`
 	Visibility      string `json:"visibility"`
 	IsArchived      bool   `json:"isArchived"`
 	IsFork          bool   `json:"isFork"`
@@ -35,8 +36,9 @@ func ValidPRMode(m string) bool {
 }
 
 const repoSettingsSelect = `
-	SELECT r.id, r.full_name, coalesce(s.visibility,''), coalesce(s.is_archived,false), coalesce(s.is_fork,false),
-	       coalesce(rs.pr_mode,'dashboard'), coalesce(rs.releases_enabled,false)
+	SELECT r.id, r.full_name, r.source, coalesce(s.visibility,''), coalesce(s.is_archived,false), coalesce(s.is_fork,false),
+	       CASE WHEN r.source = 'watched' THEN 'off' ELSE coalesce(rs.pr_mode,'dashboard') END,
+	       CASE WHEN r.source = 'watched' THEN false ELSE coalesce(rs.releases_enabled,false) END
 	FROM repos r
 	LEFT JOIN repo_snapshots s ON s.repo_id = r.id AND s.scan_id = r.last_seen_scan_id
 	LEFT JOIN repo_settings rs ON rs.repo_id = r.id AND rs.user_id = r.user_id
@@ -44,7 +46,7 @@ const repoSettingsSelect = `
 
 func scanRepoSetting(row pgx.Row) (RepoSetting, error) {
 	var s RepoSetting
-	err := row.Scan(&s.RepoID, &s.FullName, &s.Visibility, &s.IsArchived, &s.IsFork, &s.PRMode, &s.ReleasesEnabled)
+	err := row.Scan(&s.RepoID, &s.FullName, &s.Source, &s.Visibility, &s.IsArchived, &s.IsFork, &s.PRMode, &s.ReleasesEnabled)
 	return s, err
 }
 
@@ -78,13 +80,24 @@ func (s *Store) RepoSettingFor(ctx context.Context, userID, repoID int64) (RepoS
 }
 
 // SaveRepoSetting stores the switches for a repo the user owns.
+// Watched repositories are read-only and cannot have automation enabled.
 func (s *Store) SaveRepoSetting(ctx context.Context, userID int64, in RepoSetting) (RepoSetting, error) {
 	if !ValidPRMode(in.PRMode) {
 		return in, fmt.Errorf("%w: prMode must be off, dashboard or comment", ErrInvalid)
 	}
+	var source string
+	if err := s.DB.QueryRow(ctx, `SELECT source FROM repos WHERE id = $1 AND user_id = $2`, in.RepoID, userID).Scan(&source); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return in, ErrNotFound
+		}
+		return in, err
+	}
+	if source == "watched" {
+		return in, fmt.Errorf("%w: watched repositories are read-only", ErrInvalid)
+	}
 	tag, err := s.DB.Exec(ctx, `
 		INSERT INTO repo_settings (user_id, repo_id, pr_mode, releases_enabled)
-		SELECT $1, id, $3, $4 FROM repos WHERE id = $2 AND user_id = $1
+		SELECT $1, id, $3, $4 FROM repos WHERE id = $2 AND user_id = $1 AND source = 'owned'
 		ON CONFLICT (user_id, repo_id) DO UPDATE SET
 		  pr_mode = EXCLUDED.pr_mode, releases_enabled = EXCLUDED.releases_enabled, updated_at = now()`,
 		userID, in.RepoID, in.PRMode, in.ReleasesEnabled)

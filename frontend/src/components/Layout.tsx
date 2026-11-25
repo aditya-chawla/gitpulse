@@ -1,26 +1,58 @@
 import { useEffect, useRef, useState } from 'react'
-import { NavLink, Outlet } from 'react-router'
-import { api, ApiError, type AppStatus, type Me, type Scan } from '../api'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
+import { api, ApiError, type AdvisorRole, type AppStatus, type Me, type Scan } from '../api'
 import { useApi, useData } from '../data'
+import { isDemoMode } from '../demo'
 import { ago } from '../format'
+import { useAdvisor } from '../advisor'
+import AdvisorPanel from './AdvisorPanel'
 
-const nav = [
+const maintainerNav = [
   { to: '/', label: 'Analytics', end: true },
   { to: '/health', label: 'Repo health' },
   { to: '/digest', label: 'Digest' },
   { to: '/prs', label: 'Pull requests' },
   { to: '/releases', label: 'Releases' },
-  { to: '/settings', label: 'Settings' },
+]
+
+const explorerNav = [
+  { to: '/watched', label: 'Watched Radar', end: true },
 ]
 
 export default function Layout({ me, onLogout }: { me: Me; onLogout: () => void }) {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const { open, setOpen } = useAdvisor()
+
+  const isExplorer = location.pathname.startsWith('/watched')
+  const role: AdvisorRole = isExplorer ? 'contributor' : 'maintainer'
+  const nav = isExplorer ? explorerNav : maintainerNav
+
   return (
-    <div className="min-h-screen">
+    <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-40 border-b border-line bg-page/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
-          <div className="flex items-center gap-2 font-semibold text-ink">
-            <img src="/favicon.svg" alt="" className="h-6 w-6" />
-            gitpulse
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
+          <div className="flex items-center gap-3">
+            <Link to={isExplorer ? '/watched' : '/'} className="flex items-center gap-2 font-semibold text-ink">
+              <img src="/favicon.svg" alt="" className="h-6 w-6" />
+              gitpulse
+            </Link>
+            <div className="inline-flex rounded-lg border border-line bg-surface p-0.5 text-[12px]" role="group" aria-label="Workspace mode">
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className={`rounded-md px-2.5 py-1 font-medium transition-colors ${!isExplorer ? 'bg-surface-2 text-ink' : 'text-muted hover:text-ink'}`}
+              >
+                My Repos
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/watched')}
+                className={`rounded-md px-2.5 py-1 font-medium transition-colors ${isExplorer ? 'bg-surface-2 text-ink' : 'text-muted hover:text-ink'}`}
+              >
+                OSS Explorer
+              </button>
+            </div>
           </div>
           <nav className="order-3 -mx-1 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto">
             {nav.map((n) => (
@@ -30,17 +62,48 @@ export default function Layout({ me, onLogout }: { me: Me; onLogout: () => void 
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setOpen(!open)}
+              aria-pressed={open}
+              className={`rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
+                open ? 'border-accent bg-accent/15 text-accent' : 'border-line bg-surface text-ink hover:bg-surface-2'
+              }`}
+            >
+              ✦ Ask AI
+            </button>
             <ScanButton />
+            <Link
+              to="/settings"
+              title="Settings"
+              aria-label="Settings"
+              className={`rounded-md px-2 py-1 text-[14px] ${location.pathname === '/settings' ? 'bg-surface-2 text-ink' : 'text-muted hover:text-ink'}`}
+            >
+              ⚙
+            </Link>
             <ThemeToggle />
             <UserMenu me={me} onLogout={onLogout} />
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-4 py-6">
-        <InstallBanner />
-        <Outlet />
-      </main>
+      <div className="flex flex-1">
+        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+          {isDemoMode() && (
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-accent/30 bg-accent/10 px-4 py-2.5 text-[13px] text-ink">
+              <span>
+                <b>Live Demo (Read-Only):</b> Exploring sample personal repos (<i>My Repos</i>) and public OSS repos (<i>OSS Explorer</i>). Mutations are disabled.
+              </span>
+              <button type="button" onClick={onLogout} className="font-medium text-accent hover:underline">
+                Exit demo
+              </button>
+            </div>
+          )}
+          <InstallBanner />
+          <Outlet />
+        </main>
+        <AdvisorPanel role={role} />
+      </div>
     </div>
   )
 }

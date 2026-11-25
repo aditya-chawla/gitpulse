@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/harshit3011/gitpulse/backend/internal/advisor"
 	"github.com/harshit3011/gitpulse/backend/internal/api"
 	"github.com/harshit3011/gitpulse/backend/internal/auth"
 	"github.com/harshit3011/gitpulse/backend/internal/config"
@@ -27,6 +28,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/scanner"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
+	"github.com/harshit3011/gitpulse/backend/internal/watchlist"
 )
 
 func main() {
@@ -93,12 +95,13 @@ func run() error {
 	}
 	scn := scanner.New(ctx, pool, st, func(ctx context.Context, u *store.User, cache github.Cache) (github.Client, error) {
 		return installs.ReadClient(ctx, u, github.WithCache(cache), github.WithLogger(log))
-	}, log)
+	}, log, scanner.WithPublicToken(cfg.GitHubPublicToken))
+	wl := watchlist.New(pool, watchlistLookup{inst: installs, st: st, publicToken: cfg.GitHubPublicToken, log: log})
 
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(api.Deps{
-			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, PRs: prs, Releases: rels, Profile: prof, MCP: mcpserver.Handler(mcpSrv, cfg.MCPToken, log), WebhookSecret: cfg.WebhookSecret, Scanner: scn, Stats: statsSvc, ScanSecret: cfg.ScanSecret,
+			Log: log, DB: pool, Store: st, Auth: authSvc, Install: installs, LLM: ai, PRs: prs, Releases: rels, Profile: prof, MCP: mcpserver.Handler(mcpSrv, cfg.MCPToken, log), WebhookSecret: cfg.WebhookSecret, Scanner: scn, Stats: statsSvc, Advisor: advisor.New(statsSvc), Watchlist: wl, ScanSecret: cfg.ScanSecret,
 			CORSOrigins: cfg.CORSOrigins, StaticDir: cfg.StaticDir,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -205,6 +208,38 @@ func newLLM(c config.LLMConfig, pool *pgxpool.Pool, log *slog.Logger) *llm.Servi
 		log.Info("AI disabled; features use deterministic output", "reason", c.DisabledReason)
 	}
 	return llm.New(p, pool, cfg, log)
+}
+
+type watchlistLookup struct {
+	inst        *install.Service
+	st          *store.Store
+	publicToken string
+	log         *slog.Logger
+}
+
+func (l watchlistLookup) LookupPublicRepo(ctx context.Context, userID int64, owner, name string) (*watchlist.RepoMeta, error) {
+	var gh *github.HTTPClient
+	useGraphQL := false
+	if u, err := l.st.GetUser(ctx, userID); err == nil {
+		if c, err := l.inst.ReadClient(ctx, u, github.WithLogger(l.log)); err == nil {
+			gh = c
+			useGraphQL = true
+		}
+	}
+	if gh == nil {
+		gh = github.New(l.publicToken, github.WithLogger(l.log))
+		useGraphQL = l.publicToken != ""
+	}
+	r, err := gh.PublicRepo(ctx, owner, name, useGraphQL)
+	if err != nil {
+		return nil, err
+	}
+	return &watchlist.RepoMeta{
+		ID:      r.ID,
+		Owner:   r.Ref.Owner,
+		Name:    r.Ref.Name,
+		Private: r.Visibility == "private",
+	}, nil
 }
 
 func sweepSessions(ctx context.Context, st *store.Store, log *slog.Logger) {

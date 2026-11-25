@@ -19,16 +19,18 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/health"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
+	"github.com/harshit3011/gitpulse/backend/internal/trends"
 )
 
 const (
-	treeDepth    = 4
-	workers      = 3 // GitHub discourages heavy concurrency (secondary limits)
-	scanTimeout  = 45 * time.Minute
-	keepDetail   = 30
-	commitWindow = 365 * 24 * time.Hour
-	commitRescan = 7 * 24 * time.Hour  // overlap so late-pushed commits are caught
-	runsWindow   = 14 * 24 * time.Hour // failed workflow runs kept for the digest
+	treeDepth         = 4
+	workers           = 3 // GitHub discourages heavy concurrency (secondary limits)
+	scanTimeout       = 45 * time.Minute
+	keepDetail        = 30
+	commitWindow      = 365 * 24 * time.Hour
+	commitRescan      = 7 * 24 * time.Hour  // overlap so late-pushed commits are caught
+	runsWindow        = 14 * 24 * time.Hour // failed workflow runs kept for the digest
+	maxUnauthWatched  = 10                  // cap unauthenticated external repos per scan
 )
 
 var ErrUnknownUser = errors.New("unknown user")
@@ -37,12 +39,22 @@ var ErrUnknownUser = errors.New("unknown user")
 // scanner's ETag cache.
 type ClientFactory func(ctx context.Context, u *store.User, cache github.Cache) (github.Client, error)
 
+// Option configures optional Scanner behavior.
+type Option func(*Scanner)
+
+// WithPublicToken sets an optional PAT for scanning public watched repos when
+// an installation token is not used.
+func WithPublicToken(token string) Option {
+	return func(s *Scanner) { s.publicToken = token }
+}
+
 type Scanner struct {
-	db        *pgxpool.Pool
-	store     *store.Store
-	newClient ClientFactory
-	log       *slog.Logger
-	now       func() time.Time
+	db          *pgxpool.Pool
+	store       *store.Store
+	newClient   ClientFactory
+	publicToken string
+	log         *slog.Logger
+	now         func() time.Time
 
 	baseCtx context.Context
 	wg      sync.WaitGroup
@@ -50,8 +62,12 @@ type Scanner struct {
 
 // New creates a scanner. Scans run under baseCtx, so cancelling it (server
 // shutdown) stops them.
-func New(baseCtx context.Context, db *pgxpool.Pool, st *store.Store, f ClientFactory, log *slog.Logger) *Scanner {
-	return &Scanner{db: db, store: st, newClient: f, log: log, now: time.Now, baseCtx: baseCtx}
+func New(baseCtx context.Context, db *pgxpool.Pool, st *store.Store, f ClientFactory, log *slog.Logger, opts ...Option) *Scanner {
+	s := &Scanner{db: db, store: st, newClient: f, log: log, now: time.Now, baseCtx: baseCtx}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Start begins a background scan for the user. If one is already running its
@@ -164,12 +180,6 @@ func (s *Scanner) scan(ctx context.Context, scanID int64, u *store.User, gh gith
 	if err != nil {
 		return nil, err
 	}
-	if err := setPhase(ctx, s.db, scanID, "reading file trees", len(repos)); err != nil {
-		return nil, err
-	}
-	if err := upsertRepos(ctx, s.db, u.ID, scanID, repos); err != nil {
-		return nil, fmt.Errorf("upsert repos: %w", err)
-	}
 
 	var (
 		mu       sync.Mutex
@@ -183,10 +193,64 @@ func (s *Scanner) scan(ctx context.Context, scanID int64, u *store.User, gh gith
 		mu.Unlock()
 	}
 
+	if err := upsertRepos(ctx, s.db, u.ID, scanID, repos); err != nil {
+		return nil, fmt.Errorf("upsert repos: %w", err)
+	}
+
+	// Scan watched public repositories (if any).
+	watchedRows, err := listWatched(ctx, s.db, u.ID)
+	if err != nil {
+		warn("load watchlist: %v", err)
+	}
+	ownedIDs := map[int64]bool{}
+	for _, r := range repos {
+		ownedIDs[r.ID] = true
+	}
+	isWatched := map[int64]bool{}
+	pubGH, useGraphQL := s.watchedClient(gh, log)
+	if len(watchedRows) > 0 {
+		if err := setPhase(ctx, s.db, scanID, "listing watched repositories", len(repos)+len(watchedRows)); err != nil {
+			return nil, err
+		}
+		limit := len(watchedRows)
+		if !useGraphQL && limit > maxUnauthWatched {
+			warn("unauthenticated public API limit: scanning first %d of %d watched repos", maxUnauthWatched, limit)
+			limit = maxUnauthWatched
+		}
+		var watchedRepos []github.Repo
+		var watchedIDs []int64
+		for _, w := range watchedRows[:limit] {
+			r, err := pubGH.PublicRepo(ctx, w.Owner, w.Name, useGraphQL)
+			if err != nil {
+				_ = setWatchedError(ctx, s.db, w.ID, err.Error())
+				warn("watched %s/%s: %v", w.Owner, w.Name, err)
+				continue
+			}
+			_ = markWatchedScanned(ctx, s.db, w.ID, r.ID)
+			if ownedIDs[r.ID] {
+				continue // already scanned as an owned repo
+			}
+			isWatched[r.ID] = true
+			watchedRepos = append(watchedRepos, *r)
+			watchedIDs = append(watchedIDs, w.ID)
+		}
+		if len(watchedRepos) > 0 {
+			if err := upsertWatchedRepos(ctx, s.db, u.ID, scanID, watchedRepos, watchedIDs); err != nil {
+				return nil, fmt.Errorf("upsert watched repos: %w", err)
+			}
+			repos = append(repos, watchedRepos...)
+		}
+	}
+
+	if err := setPhase(ctx, s.db, scanID, "reading file trees", len(repos)); err != nil {
+		return nil, err
+	}
+
 	// Trees and manifests for non-fork, non-empty repos, batched via GraphQL.
+	// Skip unauthenticated watched repos (GraphQL requires auth).
 	var treeRefs []github.RepoRef
 	for _, r := range repos {
-		if !r.IsFork && !r.IsEmpty {
+		if !r.IsFork && !r.IsEmpty && (!isWatched[r.ID] || useGraphQL) {
 			treeRefs = append(treeRefs, r.Ref)
 		}
 	}
@@ -230,6 +294,7 @@ func (s *Scanner) scan(ctx context.Context, scanID int64, u *store.User, gh gith
 		fatal     error
 		fatalOnce sync.Once
 		wg        sync.WaitGroup
+		results   = make([]*repoResult, len(repos))
 	)
 	jobs := make(chan int)
 	for range workers {
@@ -241,7 +306,12 @@ func (s *Scanner) scan(ctx context.Context, scanID int64, u *store.User, gh gith
 					continue
 				}
 				r := repos[i]
-				res := s.collect(wctx, gh, r, files[r.Ref], byRepo[r.Ref], viewer, scanID, now, warn)
+				repoGH := gh
+				if isWatched[r.ID] {
+					repoGH = pubGH
+				}
+				res := s.collect(wctx, repoGH, r, isWatched[r.ID], files[r.Ref], byRepo[r.Ref], viewer, scanID, now, warn)
+				results[i] = res
 				if err := writeRepo(wctx, s.db, res); err != nil {
 					fatalOnce.Do(func() { fatal = fmt.Errorf("write %s: %w", r.Ref, err); wcancel() })
 					continue
@@ -261,11 +331,17 @@ send:
 		}
 	}
 	close(jobs)
-	wg.Wait() // after this, reading fatal is race-free
+	wg.Wait() // after this, reading fatal and results is race-free
 	if err := ctx.Err(); err != nil {
 		return warnings, err
 	}
-	return warnings, fatal
+	if fatal != nil {
+		return warnings, fatal
+	}
+	if err := evaluateTrends(ctx, s.db, u.ID, scanID, now, results); err != nil {
+		warn("trend evaluation: %v", err)
+	}
+	return warnings, nil
 }
 
 func toEntries(t []github.TreeEntry) []detect.Entry {
@@ -276,8 +352,21 @@ func toEntries(t []github.TreeEntry) []detect.Entry {
 	return out
 }
 
+// watchedClient picks the best GitHub client for public watched repos:
+// 1) the user's installation client, 2) GITHUB_PUBLIC_TOKEN, 3) unauthenticated.
+func (s *Scanner) watchedClient(gh github.Client, log *slog.Logger) (github.Client, bool) {
+	if gh != nil {
+		return gh, true
+	}
+	cache := dbCache{db: s.db, userID: 0}
+	if s.publicToken != "" {
+		return github.New(s.publicToken, github.WithCache(cache), github.WithLogger(log)), true
+	}
+	return github.New("", github.WithCache(cache), github.WithLogger(log)), false
+}
+
 // collect gathers per-repo REST/GraphQL extras and computes health.
-func (s *Scanner) collect(ctx context.Context, gh github.Client, r github.Repo, f detect.Files,
+func (s *Scanner) collect(ctx context.Context, gh github.Client, r github.Repo, isWatched bool, f detect.Files,
 	manifests map[string]string, viewer *github.Viewer, scanID int64, now time.Time,
 	warn func(string, ...any)) *repoResult {
 
@@ -302,7 +391,7 @@ func (s *Scanner) collect(ctx context.Context, gh github.Client, r github.Repo, 
 		}
 	}
 
-	if !r.IsEmpty {
+	if !r.IsEmpty && !isWatched {
 		since := now.Add(-commitWindow)
 		last, err := lastCommitTime(ctx, s.db, r.ID)
 		if err != nil {
@@ -340,5 +429,88 @@ func (s *Scanner) collect(ctx context.Context, gh github.Client, r github.Repo, 
 		HasTests: res.Files.HasTests, HasDescription: strings.TrimSpace(r.Description) != "",
 		TopicCount: len(r.Topics), PushedAt: r.PushedAt, Branches: branches, OpenPRCreated: prCreated,
 	}, now)
+
+	// Trend snapshot & decay-rule context.
+	var staleNames []string
+	for _, b := range branches {
+		if !b.IsDefault && b.LastCommitAt != nil && now.Sub(*b.LastCommitAt) > health.StaleBranchAge {
+			staleNames = append(staleNames, b.Name)
+		}
+	}
+	commit7d, commit30d := commitCounts(res.Weeks, res.Commits, now)
+	var uniqueAuthors30d, topAuthorPct int
+	var topAuthorLogin string
+	if !r.IsEmpty && !r.IsFork && pushedRecently {
+		authors, err := gh.RecentCommitAuthors(ctx, r.Ref, now.Add(-30*24*time.Hour), 100)
+		if err != nil {
+			warn("%s: commit authors: %v", r.Ref, err)
+		} else if len(authors) > 0 {
+			counts := map[string]int{}
+			for _, a := range authors {
+				counts[a.Login]++
+			}
+			uniqueAuthors30d = len(counts)
+			maxC := 0
+			for login, c := range counts {
+				if c > maxC {
+					maxC = c
+					topAuthorLogin = login
+				}
+			}
+			topAuthorPct = maxC * 100 / len(authors)
+			if commit30d == 0 {
+				commit30d = len(authors)
+			}
+		}
+	}
+	res.TrendSnap = trends.Snapshot{
+		RepoID: r.ID, ScanID: scanID, ScannedAt: now,
+		HealthScore: res.Health.Score, OpenPRs: r.OpenPRCount, OpenIssues: r.OpenIssueCount,
+		StaleBranches: len(staleNames), FailedRuns: len(res.Runs),
+		CommitCount7d: commit7d, CommitCount30d: commit30d,
+		UniqueAuthors30d: uniqueAuthors30d, TopAuthorLogin: topAuthorLogin, TopAuthorPct: topAuthorPct,
+		Stars: r.Stars, Forks: r.Forks,
+	}
+	prItems := make([]trends.PRItem, len(r.OpenPRs))
+	for i, p := range r.OpenPRs {
+		prItems[i] = trends.PRItem{Number: p.Number, Title: p.Title, URL: p.URL, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	}
+	runItems := make([]trends.RunItem, len(res.Runs))
+	for i, run := range res.Runs {
+		runItems[i] = trends.RunItem{Workflow: run.Name, Branch: run.Branch, URL: run.URL}
+	}
+	res.TrendCtx = trends.RepoContext{
+		FullName: r.Ref.String(), DefaultBranch: r.DefaultBranch,
+		HasCI: res.Files.HasCI, HasTests: res.Files.HasTests,
+		IsFork: r.IsFork, IsArchived: r.IsArchived,
+		OpenPRs: prItems, StaleBranchNames: staleNames, FailedRuns: runItems,
+	}
 	return res
+}
+
+func commitCounts(weeks []github.CommitWeek, commits []github.Commit, now time.Time) (c7, c30 int) {
+	cut7 := now.Add(-7 * 24 * time.Hour)
+	cut30 := now.Add(-30 * 24 * time.Hour)
+	if len(weeks) > 0 {
+		for _, w := range weeks {
+			if !w.WeekStart.Before(cut30.Add(-7 * 24 * time.Hour)) {
+				if w.WeekStart.Add(7 * 24 * time.Hour).After(cut30) {
+					c30 += w.Total
+				}
+				if w.WeekStart.Add(7 * 24 * time.Hour).After(cut7) {
+					c7 += w.Total
+				}
+			}
+		}
+		return c7, c30
+	}
+	for _, c := range commits {
+		if c.AuthoredAt.After(cut30) {
+			c30++
+		}
+		if c.AuthoredAt.After(cut7) {
+			c7++
+		}
+	}
+	return c7, c30
 }

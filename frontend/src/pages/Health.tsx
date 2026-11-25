@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from 'react'
 import { isNoData, type NoData, type RepoRow, type ReposResponse, type Status } from '../api'
-import { Card, ErrorBox, NoScanYet, Pill, RepoLink, ScoreMeter, Spinner, StatusBadge } from '../components/ui'
+import { Card, ErrorBox, NoScanYet, Pill, RepoLink, ScoreMeter, Spinner, StatusBadge, TrendBadge } from '../components/ui'
 import { useApi } from '../data'
 import { ago, num } from '../format'
 
@@ -22,7 +22,7 @@ function compare(a: RepoRow, b: RepoRow, key: SortKey): number {
 }
 
 export default function HealthPage() {
-  const q = useApi<ReposResponse | NoData>('/api/repos')
+  const q = useApi<ReposResponse | NoData>('/api/repos?source=owned')
   if (q.error) return <ErrorBox error={q.error} onRetry={q.reload} />
   if (!q.data) return <Spinner />
   if (isNoData(q.data)) return <NoScanYet />
@@ -122,6 +122,7 @@ function HealthTable({ repos }: { repos: RepoRow[] }) {
                     <td className="px-2 py-2">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <RepoLink id={r.id} name={r.name} />
+                        {r.source === 'watched' && <Pill>watched</Pill>}
                         {r.visibility === 'private' && <Pill>private</Pill>}
                         {r.isFork && <Pill>fork</Pill>}
                         {r.isArchived && <Pill>archived</Pill>}
@@ -129,7 +130,7 @@ function HealthTable({ repos }: { repos: RepoRow[] }) {
                       </div>
                       {r.description && <div className="mt-0.5 max-w-[16rem] truncate text-[12px] text-muted" title={r.description}>{r.description}</div>}
                     </td>
-                    <td className="px-2"><span className="inline-flex items-center gap-2"><span className="w-7 text-right font-medium text-ink">{r.healthScore}</span><ScoreMeter score={r.healthScore} /></span></td>
+                    <td className="px-2"><span className="inline-flex items-center gap-2"><span className="w-7 text-right font-medium text-ink">{r.healthScore}</span><ScoreMeter score={r.healthScore} /><TrendBadge direction={r.direction} /></span></td>
                     <td className="px-2"><StatusBadge status={r.status} /></td>
                     <td className="px-2"><Flags r={r} /></td>
                     <td className="px-2 text-ink-2">{r.primaryLanguage || '—'}</td>

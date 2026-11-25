@@ -1,5 +1,7 @@
 // API client and response types (mirroring backend/internal/stats and scanner).
 
+import { demoApi, isDemoMode } from './demo'
+
 // Empty means same origin (Vite dev proxy locally, Render rewrite in production).
 // Set VITE_API_BASE_URL only for the cross-origin fallback setup.
 export const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
@@ -14,6 +16,7 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  if (isDemoMode()) return demoApi<T>(path, init)
   const res = await fetch(API_BASE + path, {
     credentials: 'include',
     ...init,
@@ -61,6 +64,126 @@ export interface ScanRef {
 }
 
 export type Status = 'active' | 'slowing' | 'dormant'
+export type Direction = 'improving' | 'steady' | 'slipping'
+
+export interface DeltaSet {
+  healthScore: number
+  openPrs: number
+  staleBranches: number
+  failedRuns: number
+  commitCadence: number
+  uniqueAuthors: number
+}
+
+export interface ActionItem {
+  id: number
+  repoId: number
+  repoName: string
+  rule: string
+  severity: number
+  title: string
+  detail: Record<string, unknown>
+  url: string
+  active: boolean
+  dismissed: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TrendSnapshot {
+  repoId: number
+  scanId: number
+  scannedAt: string
+  healthScore: number
+  openPrs: number
+  openIssues: number
+  staleBranches: number
+  failedRuns: number
+  commitCount7d: number
+  commitCount30d: number
+  uniqueAuthors30d: number
+  topAuthorLogin?: string
+  topAuthorPct: number
+  stars: number
+  forks: number
+}
+
+export interface RepoTrendDetail {
+  id: number
+  name: string
+  fullName: string
+  direction: Direction
+  delta7d?: DeltaSet
+  delta30d?: DeltaSet
+  alerts: ActionItem[]
+  history: TrendSnapshot[]
+}
+
+export interface WatchedRepo {
+  id: number
+  userId: number
+  owner: string
+  name: string
+  fullName: string
+  githubId?: number
+  addedAt: string
+  lastError?: string
+}
+
+export interface Anomaly {
+  metric: string
+  zScore: number
+  current: number
+  mean: number
+  stdDev: number
+  summary: string
+}
+
+export interface RepoInsights {
+  repoId: number
+  fullName: string
+  source: 'owned' | 'watched'
+  healthScore: number
+  sampleCount: number
+  healthSlopePerDay: number
+  projectedHealth30d: number
+  openPrs: number
+  prMedianAgeDays: number
+  prP90AgeDays: number
+  prStalePct: number
+  responsiveness: 'none' | 'fast' | 'moderate' | 'slow'
+  commitCount7d: number
+  commitCount30d: number
+  uniqueAuthors30d: number
+  topAuthorLogin?: string
+  topAuthorPct: number
+  diversityScore: number
+  diversityLabel: 'inactive' | 'concentrated' | 'moderate' | 'healthy'
+  contributorReadiness: number
+  readinessVerdict: string
+  anomalies: Anomaly[]
+}
+
+export type AdvisorRole = 'maintainer' | 'contributor'
+export type AdvisorProvider = 'deterministic' | 'gemini' | 'openai' | 'anthropic'
+
+export interface AskRequest {
+  role: AdvisorRole
+  repoId?: number
+  question: string
+  provider?: AdvisorProvider
+  model?: string
+  apiKey?: string
+}
+
+export interface AskResponse {
+  answer: string
+  mode: string
+  model?: string
+  role: AdvisorRole
+  links: { label: string; url: string }[]
+  warning?: string
+}
 
 export interface HealthCheck {
   key: string
@@ -74,6 +197,7 @@ export interface RepoRow {
   id: number
   name: string
   fullName: string
+  source?: 'owned' | 'watched'
   description: string
   visibility: 'public' | 'private' | 'internal'
   isFork: boolean
@@ -98,6 +222,16 @@ export interface RepoRow {
   status: Status
   primaryLanguage: string
   excluded: string
+  direction?: Direction
+  trendDelta7d?: DeltaSet
+  trendDelta30d?: DeltaSet
+  commitCount7d?: number
+  commitCount30d?: number
+  uniqueAuthors30d?: number
+  topAuthorLogin?: string
+  topAuthorPct?: number
+  staleBranches?: number
+  failedRuns?: number
 }
 
 export interface HistoryPoint {
@@ -123,6 +257,7 @@ export interface Overview {
   openIssues: number
   avgHealth: number
   statusCounts: Record<Status, number>
+  trendSummary?: Record<Direction, number>
   history: HistoryPoint[]
 }
 
@@ -217,6 +352,7 @@ export interface RepoDetail {
   failedRuns: RunInfo[]
   history: { date: string; health: number; stars: number; forks: number }[]
   weekly: WeekPoint[]
+  trend?: RepoTrendDetail
 }
 
 export interface Digest {
@@ -229,6 +365,7 @@ export interface Digest {
   newStars: { repo: string; actor: string; at: string }[]
   newForks: { repo: string; actor: string; at: string }[]
   deltas: { repo: string; stars: number; forks: number }[]
+  whatToFixNext?: ActionItem[]
 }
 
 export interface Settings {
@@ -256,6 +393,7 @@ export type PRMode = 'off' | 'dashboard' | 'comment'
 export interface RepoSetting {
   repoId: number
   fullName: string
+  source?: 'owned' | 'watched'
   visibility: string
   isArchived: boolean
   isFork: boolean

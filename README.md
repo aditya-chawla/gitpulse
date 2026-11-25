@@ -1,36 +1,65 @@
 # gitpulse
 
-A personal GitHub dashboard. It scans every repository you own and shows:
+A **Repository Intelligence, Maintenance & Open-Source Explorer Dashboard** built on a snapshot-first PostgreSQL 17 architecture.
 
-- **Analytics**: language mix (overall and per repo), language trend by year, weekly commits, when you commit (day × hour, in your timezone), streaks, top repos by stars, forks and your commits, and the detected tech stack.
-- **Repo health**: a 0–100 score per repo with a visible breakdown (README, license, CI, tests, recent activity, stale branches, old PRs, description/topics), an active/slowing/dormant status, and a sortable, filterable table with a detail page per repo.
-- **Digest**: PRs waiting on you, new issues, failed workflow runs, and new stars/forks since the previous scan.
-- **Release notes**: grouped notes since the last release with a semver suggestion, created as a GitHub *draft* release.
-- **Profile README**: keeps a marked block in your profile README current (languages, active projects, Medium articles).
-- **MCP server**: ask Claude about your repos (health, languages, activity, digest, PR reviews) via `/mcp` or a stdio proxy.
-- **PR assistant**: reviews each new commit on your open PRs (risky changes, label suggestions, optional AI summary), in the dashboard or as one self-updating PR comment.
+### What It Does
 
-The dashboard reads only from Postgres. A **scan** fetches everything from GitHub and stores it as a snapshot, so you get trends over time. Scans run daily from GitHub Actions, or on demand from the **Scan now** button.
+1. **Two-Mode Workspace (`My Repos` | `OSS Explorer`):**
+   - **`My Repos` (Maintainer Mode):**
+     - **Analytics:** Language mix (overall & per repo), language trends by year, weekly commits, commit heatmap (day × hour in your timezone), streaks, top repos, and detected tech stack.
+     - **Repo health & 7d/30d trends:** 0–100 score per repo with visible breakdown, `active`/`slowing`/`dormant` status, and `▲ Improving` / `— Steady` / `▼ Slipping` trend badges.
+     - **What to Fix Next:** Severity-weighted maintenance queue (`ci_rot`, `pr_bottleneck`, `stale_branches`, `commit_cadence_drop`, `bus_factor`, `unprotected_code`, `no_recent_release`) with persistent dismissals.
+     - **Digest:** PRs waiting on you, new issues, failed workflow runs, and star/fork deltas since the previous scan.
+     - **PR assistant:** Automated commit-by-commit PR reviews (risky file flags, label suggestions, optional AI summary).
+     - **Release notes & Profile README:** Semver-suggested *draft* releases and automated profile README updates.
+   - **`OSS Explorer` (Contributor / Watchlist Mode):**
+     - Track any public `owner/repo` without installing the GitHub App on that repository.
+     - Evaluate commit cadence (7d/30d), contributor spread (bus factor), PR responsiveness, and read-only project signals before or while contributing.
+2. **Postgres 17 Data Science Engine (`$0` External Compute):**
+   - Computes **Z-score anomalies** (`AVG` / `STDDEV_POP`), **PR age percentiles** (`PERCENTILE_CONT`), **30-day health trajectory regression slopes** (`REGR_SLOPE`), **contributor diversity scores**, and **contributor readiness** verdicts natively in SQL.
+3. **Context-Aware `Ask AI ✦` Side Panel (BYOK + Free Deterministic):**
+   - Adapts its persona between **Maintainer Copilot** (`My Repos`) and **Contributor Advisor** (`OSS Explorer`).
+   - Works out-of-the-box in **Free Deterministic Mode** ($0 API spend) and supports **Bring-Your-Own-Key (BYOK)** for **Google Gemini**, **OpenAI GPT**, and **Anthropic Claude** (keys stay in browser `localStorage`).
+4. **1-Click Read-Only Live Demo (`/?demo=1`):**
+   - Visitors can click **View live demo (read-only)** on `/login` to explore both modes, Data Science signals, and the deterministic advisor with zero login or database writes.
+5. **MCP Server (`/mcp` & `cmd/gitpulse-mcp`):**
+   - Exposes repo health, trends, action items, Data Science insights (`get_repo_insights`), and watchlist comparisons (`compare_watched_repos`) to Claude Desktop, Cursor, or Gemini CLI.
 
-```
-backend/    Go 1.27 · chi · pgx · embedded SQL migrations
-  internal/github    GitHub client (interface + GraphQL/REST implementation)
-  internal/scanner   background scans → snapshots
-  internal/detect    README/CI/tests + tech-stack detection
-  internal/health    health score (pure, unit-tested)
-  internal/stats     dashboard queries + aggregations (unit-tested)
-  internal/auth      sign-in via the GitHub App, allowlist, sessions
-  internal/install   GitHub App installation lookup + scoped installation tokens
-  internal/llm       optional AI: provider interface, budget, cache, sanitising
-  internal/prreview  PR assistant: webhook/sync queue, rules, comment upsert
-  internal/releases  release notes: base tag, grouping, semver, draft releases
-  internal/profile   profile README block: markers, Medium RSS, commit-if-changed
-  internal/mcpserver MCP tools over streamable HTTP (/mcp)
-  cmd/gitpulse-mcp   stdio proxy for local MCP clients (Claude Desktop)
-frontend/   React · TypeScript · Vite · Tailwind · Recharts
-.github/workflows/  ci.yml (vet, test, lint, typecheck, build) · scan.yml (daily scan) · pr-sync.yml (every 30 min) · profile-readme.yml (weekly)
-render.yaml         Render Blueprint (API + static site)
-docker-compose.yml  local Postgres + backend + frontend
+### How It Works
+
+Every dashboard page reads from **PostgreSQL snapshots**, never live GitHub API calls on page load. A **scan** (triggered daily via GitHub Actions or via **Scan now**) fetches repository metadata, languages, commits, open PRs/issues, branches, and workflow runs using GraphQL + ETag-cached REST requests, computes health scores, trends, and decay alerts, and persists them as time-series snapshots.
+
+> Each folder in this repository contains its own `README.md` documenting every file inside it.
+
+```text
+backend/                 Go 1.27 · chi · pgx · embedded SQL migrations
+  cmd/server             HTTP server entrypoint
+  cmd/gitpulse-mcp       stdio proxy for local MCP clients
+  internal/advisor       Role-aware AI advisor (deterministic + BYOK Gemini/OpenAI/Claude)
+  internal/api           REST handlers, routing, CORS, CSRF origin checks
+  internal/auth          GitHub App OAuth sign-in, allowlist, cookie sessions
+  internal/config        Environment configuration & validation
+  internal/db            Postgres connection pool + embedded SQL migrations
+  internal/detect        README, CI, test, and tech-stack detection
+  internal/github        GitHub client (GraphQL/REST, ETag cache, JWT app auth)
+  internal/health        0–100 health scoring & activity status
+  internal/insights      Statistical & Data Science metrics (Z-scores, diversity, readiness)
+  internal/install       GitHub App installation lookup & scoped tokens
+  internal/llm           Optional server-side AI provider, budget cap, cache
+  internal/mcpserver     MCP tools over streamable HTTP (/mcp)
+  internal/profile       Profile README updater & Medium RSS sync
+  internal/prreview      PR assistant webhook/sync queue & comment upsert
+  internal/releases      Release note grouping, semver & draft creation
+  internal/scanner       Background scan orchestrator & snapshot persistence
+  internal/stats         Dashboard queries, Postgres DS SQL, trends & action items
+  internal/store         User, session & per-repo automation settings store
+  internal/trends        7d/30d delta evaluation & silent decay rules
+  internal/watchlist     Public repository watchlist CRUD & lookup
+frontend/                React 19 · TypeScript · Vite · Tailwind 4 · Recharts
+.github/workflows/       ci.yml · scan.yml · pr-sync.yml · profile-readme.yml
+render.yaml              Render Blueprint (API + static site)
+Dockerfile.combined      Single-service Docker build (Go API + built frontend)
+docker-compose.yml       Local Postgres 17 + backend + frontend
 ```
 
 ---

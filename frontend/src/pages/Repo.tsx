@@ -1,9 +1,10 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Link, useParams } from 'react-router'
-import { ApiError, isNoData, type Analytics, type NoData, type RepoDetail } from '../api'
+import { ApiError, isNoData, type Analytics, type DeltaSet, type NoData, type RepoDetail, type RepoInsights } from '../api'
 import { foldLanguages, languageColors, OTHER, OTHER_COLOR, scoreColor } from '../colors'
+import { useAdvisor } from '../advisor'
 import { HistoryChart, LanguageTable, SegmentedBar, WeeklyChart } from '../components/charts'
-import { Card, ChartCard, Empty, ErrorBox, Legend, NoScanYet, Pill, Spinner, StatusBadge, Table } from '../components/ui'
+import { Card, ChartCard, Empty, ErrorBox, Legend, NoScanYet, Pill, Spinner, StatusBadge, Table, TrendBadge } from '../components/ui'
 import { useApi } from '../data'
 import { ago, bytes, date, num, shortDate } from '../format'
 import { Breakdown } from './Health'
@@ -11,6 +12,7 @@ import { Breakdown } from './Health'
 export default function RepoPage() {
   const { id } = useParams()
   const q = useApi<RepoDetail | NoData>(`/api/repos/${id}`)
+  const insQ = useApi<RepoInsights>(`/api/insights/${id}`)
   const an = useApi<Analytics | NoData>('/api/analytics')
   if (q.error) {
     if (q.error instanceof ApiError && q.error.status === 404) {
@@ -21,11 +23,17 @@ export default function RepoPage() {
   if (!q.data) return <Spinner />
   if (isNoData(q.data)) return <NoScanYet />
   const order = an.data && !isNoData(an.data) ? an.data.languages.map((l) => l.language) : q.data.languages.map((l) => l.language)
-  return <Detail d={q.data} order={order} />
+  return <Detail d={q.data} insights={insQ.data} order={order} />
 }
 
-function Detail({ d, order }: { d: RepoDetail; order: string[] }) {
+function Detail({ d, insights, order }: { d: RepoDetail; insights?: RepoInsights; order: string[] }) {
   const r = d.repo
+  const { setRepoContext, askWith } = useAdvisor()
+  useEffect(() => {
+    setRepoContext(r.id, r.fullName)
+    return () => setRepoContext(undefined, undefined)
+  }, [r.id, r.fullName, setRepoContext])
+
   const color = useMemo(() => languageColors(order), [order])
   const parts = foldLanguages(d.languages, order)
   const prs = d.items.filter((i) => i.kind === 'pr')
@@ -35,11 +43,14 @@ function Detail({ d, order }: { d: RepoDetail; order: string[] }) {
   return (
     <div className="space-y-5">
       <div>
-        <Link to="/health" className="text-[13px] text-muted hover:text-accent">← Repo health</Link>
+        <Link to={r.source === 'watched' ? '/watched' : '/health'} className="text-[13px] text-muted hover:text-accent">
+          {r.source === 'watched' ? '← Watched Radar' : '← Repo health'}
+        </Link>
         <div className="mt-2 flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-ink">
               {r.name}
+              {r.source === 'watched' && <Pill>watched · read-only</Pill>}
               {r.visibility !== 'public' && <Pill>{r.visibility}</Pill>}
               {r.isFork && <Pill>fork</Pill>}
               {r.isArchived && <Pill>archived</Pill>}
@@ -47,7 +58,7 @@ function Detail({ d, order }: { d: RepoDetail; order: string[] }) {
             {r.description && <p className="mt-1 max-w-2xl text-[14px] text-ink-2">{r.description}</p>}
             <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted">
               <a href={`https://github.com/${r.fullName}`} target="_blank" rel="noreferrer" className="text-accent hover:underline">{r.fullName} ↗</a>
-              <Link to={`/releases?repo=${r.id}`} className="text-accent hover:underline">Release notes</Link>
+              {r.source !== 'watched' && <Link to={`/releases?repo=${r.id}`} className="text-accent hover:underline">Release notes</Link>}
               <span>★ {num(r.stars)}</span><span>⑂ {num(r.forks)}</span>
               <span>Created {date(r.createdAt)}</span><span>Pushed {ago(r.pushedAt)}</span>
               <span>{bytes(r.sizeKb * 1024)}</span>{r.license && <span>{r.license}</span>}
@@ -74,6 +85,98 @@ function Detail({ d, order }: { d: RepoDetail; order: string[] }) {
       <Card title="Why this score" subtitle="Each check and the points it earned">
         <Breakdown r={r} />
       </Card>
+
+      {insights && (
+        <Card
+          title="Data Science signals"
+          subtitle="Computed in Postgres from historical snapshots and open PR distributions"
+          actions={
+            <button
+              type="button"
+              onClick={() =>
+                askWith({
+                  role: r.source === 'watched' ? 'contributor' : 'maintainer',
+                  repoId: r.id,
+                  repoName: r.fullName,
+                  question:
+                    r.source === 'watched'
+                      ? `Explain the Data Science metrics for ${r.fullName} and whether it is a good repo to contribute to.`
+                      : `Explain the Data Science metrics for ${r.fullName} and what I should prioritize fixing.`,
+                })
+              }
+              className="rounded-lg border border-line bg-surface-2 px-2.5 py-1 text-[12px] font-medium text-accent hover:border-accent/50"
+            >
+              Explain ✦
+            </button>
+          }
+        >
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-[13px] tabular">
+            <div className="rounded-lg border border-line bg-surface-2/50 p-3">
+              <div className="text-[12px] text-muted">30d health projection</div>
+              <div className="mt-1 text-lg font-semibold text-ink">{insights.projectedHealth30d}/100</div>
+              <div className="text-[12px] text-muted">
+                {insights.sampleCount >= 2
+                  ? `${insights.healthSlopePerDay >= 0 ? '+' : ''}${insights.healthSlopePerDay.toFixed(2)} pts/day (${insights.sampleCount} scans)`
+                  : 'Needs ≥2 scans for slope'}
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface-2/50 p-3">
+              <div className="text-[12px] text-muted">Contributor diversity</div>
+              <div className="mt-1 text-lg font-semibold text-ink">
+                {insights.diversityScore.toFixed(2)} <span className="text-[12px] font-normal text-muted">· {insights.diversityLabel}</span>
+              </div>
+              <div className="text-[12px] text-muted">
+                {insights.uniqueAuthors30d} authors (30d){insights.topAuthorPct > 0 ? ` · top ${insights.topAuthorPct}%` : ''}
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface-2/50 p-3">
+              <div className="text-[12px] text-muted">PR responsiveness</div>
+              <div className="mt-1 text-lg font-semibold text-ink capitalize">{insights.responsiveness}</div>
+              <div className="text-[12px] text-muted">
+                {insights.openPrs > 0
+                  ? `Median ${insights.prMedianAgeDays.toFixed(1)}d · P90 ${insights.prP90AgeDays.toFixed(1)}d`
+                  : 'No open PR backlog'}
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface-2/50 p-3">
+              <div className="text-[12px] text-muted">Contributor readiness</div>
+              <div className="mt-1 text-lg font-semibold text-ink">{insights.contributorReadiness}/100</div>
+              <div className="text-[12px] text-muted">{insights.readinessVerdict}</div>
+            </div>
+          </div>
+          {insights.anomalies.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {insights.anomalies.map((a) => (
+                <span key={a.metric} className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[12px] text-amber-500">
+                  {a.summary}
+                </span>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {d.trend && (
+        <Card
+          title={<span className="inline-flex items-center gap-2">Trend & decay signals <TrendBadge direction={d.trend.direction} showLabel /></span>}
+          subtitle="7-day and 30-day deltas vs historical snapshots"
+        >
+          <div className="grid gap-4 sm:grid-cols-2">
+            <DeltaBox label="7-day delta" d={d.trend.delta7d} />
+            <DeltaBox label="30-day delta" d={d.trend.delta30d} />
+          </div>
+          {d.trend.alerts.length > 0 && (
+            <ul className="mt-4 divide-y divide-line text-[13px]">
+              {d.trend.alerts.map((a) => (
+                <li key={a.id} className="flex items-center justify-between gap-2 py-1.5">
+                  <span className="text-ink">{a.title}</span>
+                  {a.url && <a href={a.url} target="_blank" rel="noreferrer" className="shrink-0 text-accent hover:underline">Open ↗</a>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-2">
         <ChartCard
@@ -168,5 +271,39 @@ function ItemList({ items }: { items: RepoDetail['items'] }) {
         </li>
       ))}
     </ul>
+  )
+}
+
+const signedDelta = (n: number) => (n > 0 ? `+${n}` : String(n))
+
+function DeltaBox({ label, d }: { label: string; d?: DeltaSet }) {
+  if (!d) {
+    return (
+      <div className="rounded-lg border border-line bg-surface-2 p-3 text-[13px]">
+        <div className="font-medium text-ink">{label}</div>
+        <p className="mt-1 text-muted">Not enough scan history yet.</p>
+      </div>
+    )
+  }
+  const rows: [string, number][] = [
+    ['Health score', d.healthScore],
+    ['Open PRs', d.openPrs],
+    ['Stale branches', d.staleBranches],
+    ['Failed runs', d.failedRuns],
+    ['30d commits', d.commitCadence],
+    ['Unique authors', d.uniqueAuthors],
+  ]
+  return (
+    <div className="rounded-lg border border-line bg-surface-2 p-3 text-[13px]">
+      <div className="font-medium text-ink">{label}</div>
+      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 tabular">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between">
+            <dt className="text-muted">{k}</dt>
+            <dd className="font-medium text-ink-2">{signedDelta(v)}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   )
 }

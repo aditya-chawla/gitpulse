@@ -8,7 +8,7 @@ const messages: Record<string, string> = {
   exchange_failed: 'GitHub didn’t accept the sign-in. Please try again.',
 }
 
-export default function LoginPage() {
+export default function LoginPage({ onDemo }: { onDemo?: () => void }) {
   const [params] = useSearchParams()
   const err = params.get('error')
   return (
@@ -16,7 +16,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm rounded-2xl border border-line bg-surface p-8 text-center">
         <img src="/favicon.svg" alt="" className="mx-auto h-10 w-10" />
         <h1 className="mt-4 text-xl font-semibold text-ink">gitpulse</h1>
-        <p className="mt-1 text-[13px] text-muted">Analytics and health for your GitHub repositories.</p>
+        <p className="mt-1 text-[13px] text-muted">Repository intelligence, Postgres Data Science signals, and OSS contributor radar.</p>
         {err && (
           <p role="alert" className="mt-5 rounded-lg bg-surface-2 px-3 py-2 text-left text-[13px] text-ink-2">
             {messages[err] ?? 'Sign-in failed. Please try again.'}
@@ -29,6 +29,20 @@ export default function LoginPage() {
           </svg>
           Sign in with GitHub
         </a>
+        {onDemo && (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={onDemo}
+              className="w-full rounded-lg border border-line bg-surface-2 px-4 py-2 text-[13px] font-medium text-ink hover:border-accent/50 hover:text-accent"
+            >
+              View live demo (read-only)
+            </button>
+            <p className="mt-2 text-[11px] text-muted">
+              Explore My Repos, OSS Explorer, DS insights &amp; Ask AI without signing in.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   )

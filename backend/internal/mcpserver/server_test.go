@@ -16,10 +16,12 @@ import (
 
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/health"
+	"github.com/harshit3011/gitpulse/backend/internal/insights"
 	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/releases"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
+	"github.com/harshit3011/gitpulse/backend/internal/trends"
 )
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -33,6 +35,7 @@ type fake struct {
 	noScan      bool
 	releasesOn  bool
 	created     []releases.CreateInput
+	dismissed   []int64
 	mergedCount int
 }
 
@@ -97,6 +100,54 @@ func (f *fake) CreateRelease(_ context.Context, _ *store.User, _ int64, in relea
 	f.created = append(f.created, in)
 	return &github.Release{ID: 1, TagName: in.Tag, Draft: true, HTMLURL: "https://github.com/me/meh/releases/tag/untagged-1"}, nil
 }
+func (f *fake) TrendsOverview(context.Context, *store.User) ([]stats.RepoTrend, error) {
+	return []stats.RepoTrend{
+		{ID: 1, Name: "good", FullName: "me/good", Direction: trends.Improving},
+		{ID: 2, Name: "meh", FullName: "me/meh", Direction: trends.Slipping},
+	}, nil
+}
+func (f *fake) TrendForRepo(_ context.Context, _ *store.User, id int64) (*stats.RepoTrendDetail, error) {
+	if id != 2 {
+		return nil, stats.ErrNotFound
+	}
+	return &stats.RepoTrendDetail{
+		RepoTrend: stats.RepoTrend{ID: 2, Name: "meh", FullName: "me/meh", Direction: trends.Slipping},
+		Alerts:    []stats.ActionItem{{ID: 11, RepoID: 2, RepoName: "me/meh", Rule: "ci_rot", Severity: 4, Title: "CI failing"}},
+	}, nil
+}
+func (f *fake) ActionItems(context.Context, *store.User, int) ([]stats.ActionItem, error) {
+	return []stats.ActionItem{{ID: 11, RepoID: 2, RepoName: "me/meh", Rule: "ci_rot", Severity: 4, Title: "CI failing"}}, nil
+}
+func (f *fake) DismissActionItem(_ context.Context, _ *store.User, id int64) error {
+	if id != 11 {
+		return stats.ErrNotFound
+	}
+	f.dismissed = append(f.dismissed, id)
+	return nil
+}
+func (f *fake) Insights(_ context.Context, _ *store.User, source string) ([]insights.RepoInsights, error) {
+	all := []insights.RepoInsights{
+		{RepoID: 1, FullName: "me/good", Source: "owned", HealthScore: 95, ContributorReadiness: 90, ReadinessVerdict: "Welcoming"},
+		{RepoID: 2, FullName: "me/meh", Source: "owned", HealthScore: 55, ContributorReadiness: 60, ReadinessVerdict: "Steady"},
+		{RepoID: 6, FullName: "oss/cool", Source: "watched", HealthScore: 84, ContributorReadiness: 86, ReadinessVerdict: "Welcoming"},
+	}
+	if source == "" {
+		return all, nil
+	}
+	var out []insights.RepoInsights
+	for _, r := range all {
+		if r.Source == source {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+func (f *fake) RepoInsights(_ context.Context, _ *store.User, id int64) (*insights.RepoInsights, error) {
+	if id != 2 {
+		return nil, stats.ErrNotFound
+	}
+	return &insights.RepoInsights{RepoID: 2, FullName: "me/meh", Source: "owned", HealthScore: 55, ContributorReadiness: 60}, nil
+}
 
 func connect(t *testing.T, f *fake, writes bool) *mcp.ClientSession {
 	t.Helper()
@@ -140,18 +191,18 @@ func TestToolList(t *testing.T) {
 		var n []string
 		for _, tl := range res.Tools {
 			n = append(n, tl.Name)
-			if tl.Name != "draft_release_notes" && (tl.Annotations == nil || !tl.Annotations.ReadOnlyHint) {
+			if tl.Name != "draft_release_notes" && tl.Name != "dismiss_action" && (tl.Annotations == nil || !tl.Annotations.ReadOnlyHint) {
 				t.Errorf("%s must be annotated read-only", tl.Name)
 			}
 		}
 		slices.Sort(n)
 		return n
 	}
-	ro := []string{"get_activity", "get_digest", "get_language_stats", "get_pr_reviews", "get_repo_health", "list_repos_needing_attention"}
+	ro := []string{"compare_watched_repos", "get_action_items", "get_activity", "get_digest", "get_language_stats", "get_pr_reviews", "get_repo_health", "get_repo_insights", "get_trends", "list_repos_needing_attention"}
 	if got := names(false); !slices.Equal(got, ro) {
 		t.Fatalf("read-only tools = %v", got)
 	}
-	if got := names(true); !slices.Contains(got, "draft_release_notes") || len(got) != 7 {
+	if got := names(true); !slices.Contains(got, "draft_release_notes") || !slices.Contains(got, "dismiss_action") || len(got) != 12 {
 		t.Fatalf("with writes = %v", got)
 	}
 }
@@ -281,7 +332,7 @@ func TestHTTPAuth(t *testing.T) {
 	}
 	defer cs.Close()
 	res, err := cs.ListTools(context.Background(), nil)
-	if err != nil || len(res.Tools) != 6 {
+	if err != nil || len(res.Tools) != 10 {
 		t.Fatalf("tools over HTTP: %v %v", res, err)
 	}
 
@@ -296,3 +347,28 @@ func TestHTTPAuth(t *testing.T) {
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestTrendAndActionTools(t *testing.T) {
+	f := &fake{}
+	cs := connect(t, f, true)
+
+	out, errText := call(t, cs, "get_trends", nil)
+	if errText != "" || len(out["repos"].([]any)) != 2 {
+		t.Fatalf("get_trends all: out=%v err=%q", out, errText)
+	}
+
+	out, errText = call(t, cs, "get_trends", map[string]any{"repo": "me/meh"})
+	if errText != "" || out["direction"] != "slipping" {
+		t.Fatalf("get_trends single: out=%v err=%q", out, errText)
+	}
+
+	out, errText = call(t, cs, "get_action_items", map[string]any{"limit": 5})
+	if errText != "" || len(out["items"].([]any)) != 1 {
+		t.Fatalf("get_action_items: out=%v err=%q", out, errText)
+	}
+
+	out, errText = call(t, cs, "dismiss_action", map[string]any{"id": 11})
+	if errText != "" || out["ok"] != true || len(f.dismissed) != 1 {
+		t.Fatalf("dismiss_action: out=%v err=%q dismissed=%v", out, errText, f.dismissed)
+	}
+}

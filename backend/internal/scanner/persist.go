@@ -14,6 +14,7 @@ import (
 	"github.com/harshit3011/gitpulse/backend/internal/detect"
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/health"
+	"github.com/harshit3011/gitpulse/backend/internal/trends"
 )
 
 // Scan is a row of the scans table, as exposed to the API.
@@ -100,10 +101,55 @@ func upsertRepos(ctx context.Context, db *pgxpool.Pool, userID, scanID int64, re
 		ids[i], names[i] = r.ID, r.Ref.String()
 	}
 	_, err := db.Exec(ctx, `
-		INSERT INTO repos (id, user_id, full_name, last_seen_scan_id)
-		SELECT unnest($1::bigint[]), $3, unnest($2::text[]), $4
-		ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name, last_seen_scan_id = EXCLUDED.last_seen_scan_id`,
+		INSERT INTO repos (id, user_id, full_name, last_seen_scan_id, source)
+		SELECT unnest($1::bigint[]), $3, unnest($2::text[]), $4, 'owned'
+		ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name, last_seen_scan_id = EXCLUDED.last_seen_scan_id, source = 'owned', watched_repo_id = NULL`,
 		ids, names, userID, scanID)
+	return err
+}
+
+type watchedTarget struct {
+	ID    int64
+	Owner string
+	Name  string
+}
+
+func listWatched(ctx context.Context, db *pgxpool.Pool, userID int64) ([]watchedTarget, error) {
+	rows, err := db.Query(ctx, `SELECT id, owner, name FROM watched_repos WHERE user_id = $1 ORDER BY id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (watchedTarget, error) {
+		var w watchedTarget
+		return w, r.Scan(&w.ID, &w.Owner, &w.Name)
+	})
+}
+
+func setWatchedError(ctx context.Context, db *pgxpool.Pool, id int64, errMsg string) error {
+	_, err := db.Exec(ctx, `UPDATE watched_repos SET last_error = NULLIF($2, '') WHERE id = $1`, id, errMsg)
+	return err
+}
+
+func markWatchedScanned(ctx context.Context, db *pgxpool.Pool, id, githubID int64) error {
+	_, err := db.Exec(ctx, `UPDATE watched_repos SET github_id = $2, last_error = NULL WHERE id = $1`, id, githubID)
+	return err
+}
+
+func upsertWatchedRepos(ctx context.Context, db *pgxpool.Pool, userID, scanID int64, repos []github.Repo, watchedIDs []int64) error {
+	ids := make([]int64, len(repos))
+	names := make([]string, len(repos))
+	for i, r := range repos {
+		ids[i], names[i] = r.ID, r.Ref.String()
+	}
+	_, err := db.Exec(ctx, `
+		INSERT INTO repos (id, user_id, full_name, last_seen_scan_id, source, watched_repo_id)
+		SELECT unnest($1::bigint[]), $3, unnest($2::text[]), $4, 'watched', unnest($5::bigint[])
+		ON CONFLICT (id) DO UPDATE SET
+		  full_name = EXCLUDED.full_name,
+		  last_seen_scan_id = EXCLUDED.last_seen_scan_id,
+		  source = CASE WHEN repos.user_id = EXCLUDED.user_id THEN 'watched' ELSE repos.source END,
+		  watched_repo_id = CASE WHEN repos.user_id = EXCLUDED.user_id THEN EXCLUDED.watched_repo_id ELSE repos.watched_repo_id END`,
+		ids, names, userID, scanID, watchedIDs)
 	return err
 }
 
@@ -115,16 +161,18 @@ func lastCommitTime(ctx context.Context, db *pgxpool.Pool, repoID int64) (*time.
 
 // repoResult is everything gathered for one repo in one scan.
 type repoResult struct {
-	Repo    github.Repo
-	Files   detect.Files
-	Tech    []detect.Tech
-	Weeks   []github.CommitWeek
-	Commits []github.Commit
-	Runs    []github.WorkflowRun
-	Health  health.Result
-	Login   string // viewer login, for review-request/assignee flags
-	UserID  int64
-	ScanID  int64
+	Repo      github.Repo
+	Files     detect.Files
+	Tech      []detect.Tech
+	Weeks     []github.CommitWeek
+	Commits   []github.Commit
+	Runs      []github.WorkflowRun
+	Health    health.Result
+	TrendSnap trends.Snapshot
+	TrendCtx  trends.RepoContext
+	Login     string // viewer login, for review-request/assignee flags
+	UserID    int64
+	ScanID    int64
 }
 
 func contains(list []string, s string) bool { return slices.Contains(list, s) }
@@ -248,8 +296,101 @@ func writeRepo(ctx context.Context, db *pgxpool.Pool, r *repoResult) error {
 				}
 			}
 		}
+
+		ts := r.TrendSnap
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO repo_trend_snapshots (
+			  repo_id, scan_id, scanned_at, health_score, open_prs, open_issues,
+			  stale_branches, failed_runs, commit_count_7d, commit_count_30d,
+			  unique_authors_30d, top_author_login, top_author_pct, stars, forks
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,$15)
+			ON CONFLICT (repo_id, scan_id) DO UPDATE SET
+			  scanned_at = EXCLUDED.scanned_at, health_score = EXCLUDED.health_score,
+			  open_prs = EXCLUDED.open_prs, open_issues = EXCLUDED.open_issues,
+			  stale_branches = EXCLUDED.stale_branches, failed_runs = EXCLUDED.failed_runs,
+			  commit_count_7d = EXCLUDED.commit_count_7d, commit_count_30d = EXCLUDED.commit_count_30d,
+			  unique_authors_30d = EXCLUDED.unique_authors_30d, top_author_login = EXCLUDED.top_author_login,
+			  top_author_pct = EXCLUDED.top_author_pct, stars = EXCLUDED.stars, forks = EXCLUDED.forks`,
+			ts.RepoID, ts.ScanID, ts.ScannedAt, ts.HealthScore, ts.OpenPRs, ts.OpenIssues,
+			ts.StaleBranches, ts.FailedRuns, ts.CommitCount7d, ts.CommitCount30d,
+			ts.UniqueAuthors30d, ts.TopAuthorLogin, ts.TopAuthorPct, ts.Stars, ts.Forks); err != nil {
+			return err
+		}
 		return nil
 	})
+}
+
+func loadBaseline(ctx context.Context, db *pgxpool.Pool, repoID, scanID int64, now time.Time) (trends.Baseline, error) {
+	var b trends.Baseline
+	querySnap := func(where string, args ...any) (*trends.Snapshot, error) {
+		var s trends.Snapshot
+		err := db.QueryRow(ctx, `
+			SELECT repo_id, scan_id, scanned_at, health_score, open_prs, open_issues,
+			  stale_branches, failed_runs, commit_count_7d, commit_count_30d,
+			  unique_authors_30d, coalesce(top_author_login,''), top_author_pct, stars, forks
+			FROM repo_trend_snapshots `+where+` LIMIT 1`, args...).Scan(
+			&s.RepoID, &s.ScanID, &s.ScannedAt, &s.HealthScore, &s.OpenPRs, &s.OpenIssues,
+			&s.StaleBranches, &s.FailedRuns, &s.CommitCount7d, &s.CommitCount30d,
+			&s.UniqueAuthors30d, &s.TopAuthorLogin, &s.TopAuthorPct, &s.Stars, &s.Forks)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return &s, err
+	}
+	var err error
+	if b.PrevScan, err = querySnap(`WHERE repo_id = $1 AND scan_id < $2 ORDER BY scan_id DESC`, repoID, scanID); err != nil {
+		return b, err
+	}
+	if b.Days7, err = querySnap(`WHERE repo_id = $1 AND scan_id < $2 AND scanned_at <= $3 ORDER BY scanned_at DESC`, repoID, scanID, now.Add(-7*24*time.Hour)); err != nil {
+		return b, err
+	}
+	if b.Days30, err = querySnap(`WHERE repo_id = $1 AND scan_id < $2 AND scanned_at <= $3 ORDER BY scanned_at DESC`, repoID, scanID, now.Add(-30*24*time.Hour)); err != nil {
+		return b, err
+	}
+	return b, nil
+}
+
+func evaluateTrends(ctx context.Context, db *pgxpool.Pool, userID, scanID int64, now time.Time, results []*repoResult) error {
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		base, err := loadBaseline(ctx, db, r.Repo.ID, scanID, now)
+		if err != nil {
+			return err
+		}
+		res := trends.Evaluate(r.TrendSnap, base, r.TrendCtx, now)
+		activeRules := make([]string, 0, len(res.Alerts))
+		for _, a := range res.Alerts {
+			activeRules = append(activeRules, a.Rule)
+			detailJSON, err := json.Marshal(a.Detail)
+			if err != nil {
+				detailJSON = []byte("{}")
+			}
+			if _, err := db.Exec(ctx, `
+				INSERT INTO action_items (user_id, repo_id, rule, severity, title, detail, url, active, last_scan_id)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8)
+				ON CONFLICT (user_id, repo_id, rule) DO UPDATE SET
+				  severity = EXCLUDED.severity,
+				  title = EXCLUDED.title,
+				  detail = EXCLUDED.detail,
+				  url = EXCLUDED.url,
+				  active = true,
+				  last_scan_id = EXCLUDED.last_scan_id,
+				  updated_at = now()`,
+				userID, r.Repo.ID, a.Rule, a.Severity, a.Title, detailJSON, a.URL, scanID); err != nil {
+				return err
+			}
+		}
+		if _, err := db.Exec(ctx, `
+			UPDATE action_items
+			SET active = false, last_scan_id = $3, updated_at = now()
+			WHERE user_id = $1 AND repo_id = $2 AND active = true AND NOT (rule = ANY($4))`,
+			userID, r.Repo.ID, scanID, activeRules); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyRows(ctx context.Context, tx pgx.Tx, table string, cols []string, rows [][]any) error {

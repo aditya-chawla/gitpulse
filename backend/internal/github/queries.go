@@ -263,6 +263,136 @@ func (c *HTTPClient) OwnedRepos(ctx context.Context, login string) ([]Repo, erro
 	return repos, nil
 }
 
+// ErrPrivateRepo is returned when a watched repository is private.
+var ErrPrivateRepo = errors.New("private repositories cannot be watched")
+
+const publicRepoQuery = `
+query($o: String!, $n: String!) {
+  repository(owner: $o, name: $n) {
+    databaseId id name owner { login } description visibility isFork isArchived isEmpty
+    stargazerCount forkCount diskUsage createdAt pushedAt
+    defaultBranchRef { name }
+    licenseInfo { spdxId }
+    repositoryTopics(first: 20) { nodes { topic { name } } }
+    languages(first: 30, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name } } }
+    pullRequests(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) {
+      totalCount
+      nodes {
+        number title url isDraft createdAt updatedAt author { login }
+        reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } } } }
+        assignees(first: 5) { nodes { login } }
+      }
+    }
+    issues(states: OPEN, first: 50, orderBy: {field: CREATED_AT, direction: DESC}) {
+      totalCount
+      nodes { number title url createdAt updatedAt author { login } assignees(first: 5) { nodes { login } } }
+    }
+    refs(refPrefix: "refs/heads/", first: 100) {
+      totalCount
+      nodes { name target { ... on Commit { committedDate } } }
+    }
+  }
+}`
+
+// PublicRepo fetches a single public repository by owner/name. When useGraphQL
+// is true it uses GraphQL; otherwise it falls back to unauthenticated REST.
+func (c *HTTPClient) PublicRepo(ctx context.Context, owner, name string, useGraphQL bool) (*Repo, error) {
+	if useGraphQL {
+		var out struct {
+			Repository *gqlRepo `json:"repository"`
+		}
+		if err := c.graphql(ctx, publicRepoQuery, map[string]any{"o": owner, "n": name}, &out); err != nil {
+			return nil, fmt.Errorf("public repo %s/%s: %w", owner, name, err)
+		}
+		if out.Repository == nil {
+			return nil, &APIError{Status: http.StatusNotFound, URL: c.graphqlURL, Body: fmt.Sprintf("repository %s/%s not found", owner, name)}
+		}
+		r := out.Repository.toRepo()
+		if r.Visibility == "private" {
+			return nil, ErrPrivateRepo
+		}
+		return &r, nil
+	}
+
+	ref := RepoRef{Owner: owner, Name: name}
+	var raw struct {
+		ID              int64      `json:"id"`
+		NodeID          string     `json:"node_id"`
+		Name            string     `json:"name"`
+		FullName        string     `json:"full_name"`
+		Private         bool       `json:"private"`
+		Visibility      string     `json:"visibility"`
+		Description     *string    `json:"description"`
+		Fork            bool       `json:"fork"`
+		Archived        bool       `json:"archived"`
+		Size            int        `json:"size"`
+		StargazersCount int        `json:"stargazers_count"`
+		ForksCount      int        `json:"forks_count"`
+		DefaultBranch   string     `json:"default_branch"`
+		Topics          []string   `json:"topics"`
+		OpenIssuesCount int        `json:"open_issues_count"`
+		CreatedAt       time.Time  `json:"created_at"`
+		PushedAt        *time.Time `json:"pushed_at"`
+		Owner           login      `json:"owner"`
+		License         *struct {
+			SPDXID string `json:"spdx_id"`
+		} `json:"license"`
+	}
+	if err := c.getJSON(ctx, repoPath(ref), &raw); err != nil {
+		return nil, err
+	}
+	if raw.Private || strings.EqualFold(raw.Visibility, "private") {
+		return nil, ErrPrivateRepo
+	}
+	vis := strings.ToLower(raw.Visibility)
+	if vis == "" {
+		vis = "public"
+	}
+	r := &Repo{
+		ID: raw.ID, NodeID: raw.NodeID, Ref: RepoRef{Owner: raw.Owner.Login, Name: raw.Name},
+		Visibility: vis, IsFork: raw.Fork, IsArchived: raw.Archived, IsEmpty: raw.Size == 0,
+		Stars: raw.StargazersCount, Forks: raw.ForksCount, SizeKB: raw.Size,
+		DefaultBranch: raw.DefaultBranch, Topics: raw.Topics,
+		CreatedAt: raw.CreatedAt, PushedAt: raw.PushedAt,
+	}
+	if raw.Description != nil {
+		r.Description = *raw.Description
+	}
+	if raw.License != nil {
+		r.LicenseSPDX = raw.License.SPDXID
+	}
+
+	var langMap map[string]int64
+	if err := c.getJSON(ctx, repoPath(ref)+"/languages", &langMap); err == nil {
+		for lang, bytes := range langMap {
+			r.Languages = append(r.Languages, LanguageBytes{Language: lang, Bytes: bytes})
+		}
+	}
+
+	var rawBranches []struct {
+		Name string `json:"name"`
+	}
+	if err := c.getJSON(ctx, repoPath(ref)+"/branches?per_page=100", &rawBranches); err == nil {
+		for _, b := range rawBranches {
+			r.Branches = append(r.Branches, Branch{Name: b.Name})
+		}
+	}
+
+	var rawPRs []ghPR
+	if err := c.getJSON(ctx, repoPath(ref)+"/pulls?state=open&sort=created&direction=asc&per_page=100", &rawPRs); err == nil {
+		r.OpenPRCount = len(rawPRs)
+		for _, p := range rawPRs {
+			pr := p.toPR()
+			r.OpenPRs = append(r.OpenPRs, Item{
+				Number: pr.Number, Title: pr.Title, Author: pr.Author, URL: pr.URL,
+				IsDraft: pr.Draft, CreatedAt: pr.CreatedAt, UpdatedAt: pr.UpdatedAt,
+			})
+		}
+	}
+	r.OpenIssueCount = max(0, raw.OpenIssuesCount-r.OpenPRCount)
+	return r, nil
+}
+
 // treeFragment builds a nested Tree fragment `depth` levels deep.
 func treeFragment(depth int) string {
 	inner := "entries { name type }"
@@ -509,6 +639,50 @@ func (c *HTTPClient) FailedRuns(ctx context.Context, repo RepoRef, since time.Ti
 	out := make([]WorkflowRun, 0, len(res.WorkflowRuns))
 	for _, r := range res.WorkflowRuns {
 		out = append(out, WorkflowRun{ID: r.ID, Name: r.Name, Branch: r.HeadBranch, Conclusion: r.Conclusion, URL: r.HTMLURL, CreatedAt: r.CreatedAt})
+	}
+	return out, nil
+}
+
+// RecentCommitAuthors fetches a single page (up to 100) of recent commits
+// since `since` for contributor concentration / bus-factor checks.
+func (c *HTTPClient) RecentCommitAuthors(ctx context.Context, repo RepoRef, since time.Time, limit int) ([]CommitAuthor, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	q := url.Values{
+		"since":    {since.UTC().Format(time.RFC3339)},
+		"per_page": {fmt.Sprintf("%d", limit)},
+	}
+	_, body, err := c.restGet(ctx, repoPath(repo)+"/commits?"+q.Encode())
+	if err != nil {
+		var ae *APIError
+		if IsNotFound(err) || (errors.As(err, &ae) && ae.Status == http.StatusConflict) {
+			return nil, nil // empty repo or unavailable
+		}
+		return nil, err
+	}
+	var raw []struct {
+		Author *login `json:"author"`
+		Commit struct {
+			Author struct {
+				Name string    `json:"name"`
+				Date time.Time `json:"date"`
+			} `json:"author"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("decode commits %s: %w", repo, err)
+	}
+	out := make([]CommitAuthor, 0, len(raw))
+	for _, item := range raw {
+		who := item.Commit.Author.Name
+		if item.Author != nil && item.Author.Login != "" {
+			who = item.Author.Login
+		}
+		if who == "" {
+			continue
+		}
+		out = append(out, CommitAuthor{Login: who, At: item.Commit.Author.Date})
 	}
 	return out, nil
 }

@@ -12,6 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/harshit3011/gitpulse/backend/internal/trends"
 )
 
 var (
@@ -114,6 +116,7 @@ type RepoRow struct {
 	ID              int64           `json:"id"`
 	Name            string          `json:"name"`
 	FullName        string          `json:"fullName"`
+	Source          string          `json:"source"`
 	Description     string          `json:"description"`
 	Visibility      string          `json:"visibility"`
 	IsFork          bool            `json:"isFork"`
@@ -136,32 +139,60 @@ type RepoRow struct {
 	HealthScore     int             `json:"healthScore"`
 	HealthBreakdown json.RawMessage `json:"healthBreakdown"`
 	Status          string          `json:"status"`
-	PrimaryLanguage string          `json:"primaryLanguage"`
-	Excluded        string          `json:"excluded"` // reason, empty when included
+	PrimaryLanguage string           `json:"primaryLanguage"`
+	Excluded        string           `json:"excluded"` // reason, empty when included
+	Direction       trends.Direction `json:"direction,omitempty"`
+	TrendDelta7d    *trends.DeltaSet `json:"trendDelta7d,omitempty"`
+	TrendDelta30d   *trends.DeltaSet `json:"trendDelta30d,omitempty"`
+	CommitCount7d   int              `json:"commitCount7d,omitempty"`
+	CommitCount30d  int              `json:"commitCount30d,omitempty"`
+	UniqueAuthors30d int             `json:"uniqueAuthors30d,omitempty"`
+	TopAuthorLogin  string           `json:"topAuthorLogin,omitempty"`
+	TopAuthorPct    float64          `json:"topAuthorPct,omitempty"`
+	StaleBranches   int              `json:"staleBranches,omitempty"`
+	FailedRuns      int              `json:"failedRuns,omitempty"`
 }
 
 const repoRowSQL = `
-	SELECT s.repo_id, s.name, r.full_name, coalesce(s.description,''), s.visibility, s.is_fork, s.is_archived,
+	SELECT s.repo_id, s.name, r.full_name, r.source, coalesce(s.description,''), s.visibility, s.is_fork, s.is_archived,
 	  s.stars, s.forks, s.size_kb, coalesce(s.default_branch,''), s.topics, coalesce(s.license_spdx,''),
 	  s.created_at, s.pushed_at, s.has_readme, s.has_license, s.has_gitignore, s.has_ci, s.has_tests,
 	  s.open_prs, s.open_issues, s.health_score, s.health_breakdown, s.status,
 	  coalesce((SELECT l.language FROM repo_languages l WHERE l.scan_id = s.scan_id AND l.repo_id = s.repo_id
-	            ORDER BY l.bytes DESC LIMIT 1), '')
-	FROM repo_snapshots s JOIN repos r ON r.id = s.repo_id
+	            ORDER BY l.bytes DESC LIMIT 1), ''),
+	  coalesce(ts.commit_count_7d, 0), coalesce(ts.commit_count_30d, 0), coalesce(ts.unique_authors_30d, 0),
+	  coalesce(ts.top_author_login, ''), coalesce(ts.top_author_pct, 0), coalesce(ts.stale_branches, 0), coalesce(ts.failed_runs, 0)
+	FROM repo_snapshots s
+	JOIN repos r ON r.id = s.repo_id
+	LEFT JOIN repo_trend_snapshots ts ON ts.scan_id = s.scan_id AND ts.repo_id = s.repo_id
 	WHERE s.scan_id = $1`
 
 func scanRepoRow(row pgx.Row, st Settings) (RepoRow, error) {
 	var r RepoRow
-	err := row.Scan(&r.ID, &r.Name, &r.FullName, &r.Description, &r.Visibility, &r.IsFork, &r.IsArchived,
+	err := row.Scan(&r.ID, &r.Name, &r.FullName, &r.Source, &r.Description, &r.Visibility, &r.IsFork, &r.IsArchived,
 		&r.Stars, &r.Forks, &r.SizeKB, &r.DefaultBranch, &r.Topics, &r.License, &r.CreatedAt, &r.PushedAt,
 		&r.HasReadme, &r.HasLicense, &r.HasGitignore, &r.HasCI, &r.HasTests, &r.OpenPRs, &r.OpenIssues,
-		&r.HealthScore, &r.HealthBreakdown, &r.Status, &r.PrimaryLanguage)
+		&r.HealthScore, &r.HealthBreakdown, &r.Status, &r.PrimaryLanguage,
+		&r.CommitCount7d, &r.CommitCount30d, &r.UniqueAuthors30d,
+		&r.TopAuthorLogin, &r.TopAuthorPct, &r.StaleBranches, &r.FailedRuns)
 	r.Excluded = st.Exclusion(r.ID, r.Name, r.IsFork, r.IsArchived)
 	return r, err
 }
 
 func (s *Service) repoRows(ctx context.Context, scanID int64, st Settings) ([]RepoRow, error) {
-	rows, err := s.db.Query(ctx, repoRowSQL+` ORDER BY lower(s.name)`, scanID)
+	return s.repoRowsForSource(ctx, scanID, st, "")
+}
+
+func (s *Service) repoRowsForSource(ctx context.Context, scanID int64, st Settings, source string) ([]RepoRow, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if source == "owned" || source == "watched" {
+		rows, err = s.db.Query(ctx, repoRowSQL+` AND r.source = $2 ORDER BY lower(s.name)`, scanID, source)
+	} else {
+		rows, err = s.db.Query(ctx, repoRowSQL+` ORDER BY lower(s.name)`, scanID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +205,10 @@ type ReposResponse struct {
 }
 
 func (s *Service) Repos(ctx context.Context, userID int64) (*ReposResponse, error) {
+	return s.ReposForSource(ctx, userID, "")
+}
+
+func (s *Service) ReposForSource(ctx context.Context, userID int64, source string) (*ReposResponse, error) {
 	latest, _, err := s.scans(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -182,9 +217,23 @@ func (s *Service) Repos(ctx context.Context, userID int64) (*ReposResponse, erro
 	if err != nil {
 		return nil, err
 	}
-	repos, err := s.repoRows(ctx, latest.ID, st)
+	repos, err := s.repoRowsForSource(ctx, latest.ID, st, source)
 	if err != nil {
 		return nil, err
+	}
+	repoTrends, err := s.trendsForRepos(ctx, userID, latest.ID, latest.StartedAt, repos)
+	if err == nil {
+		byID := make(map[int64]RepoTrend, len(repoTrends))
+		for _, rt := range repoTrends {
+			byID[rt.ID] = rt
+		}
+		for i := range repos {
+			if rt, ok := byID[repos[i].ID]; ok {
+				repos[i].Direction = rt.Direction
+				repos[i].TrendDelta7d = rt.Delta7d
+				repos[i].TrendDelta30d = rt.Delta30d
+			}
+		}
 	}
 	return &ReposResponse{Scan: *latest, Repos: repos}, nil
 }
@@ -226,6 +275,7 @@ type Overview struct {
 	OpenIssues   int            `json:"openIssues"`
 	AvgHealth    float64        `json:"avgHealth"`
 	StatusCounts map[string]int `json:"statusCounts"`
+	TrendSummary map[string]int `json:"trendSummary"`
 	History      []HistoryPoint `json:"history"`
 }
 
@@ -238,12 +288,13 @@ func (s *Service) Overview(ctx context.Context, userID int64) (*Overview, error)
 	if err != nil {
 		return nil, err
 	}
-	repos, err := s.repoRows(ctx, latest.ID, st)
+	repos, err := s.repoRowsForSource(ctx, latest.ID, st, "owned")
 	if err != nil {
 		return nil, err
 	}
 	o := &Overview{Scan: *latest, PrevScan: prev, TotalRepos: len(repos),
-		StatusCounts: map[string]int{"active": 0, "slowing": 0, "dormant": 0}}
+		StatusCounts: map[string]int{"active": 0, "slowing": 0, "dormant": 0},
+		TrendSummary: map[string]int{"improving": 0, "steady": 0, "slipping": 0}}
 	healthSum := 0
 	for _, r := range repos {
 		if r.IsFork {
@@ -269,12 +320,19 @@ func (s *Service) Overview(ctx context.Context, userID int64) (*Overview, error)
 	if o.Included > 0 {
 		o.AvgHealth = round1(float64(healthSum) / float64(o.Included))
 	}
+	if repoTrends, err := s.trendsForRepos(ctx, userID, latest.ID, latest.StartedAt, repos); err == nil {
+		for _, rt := range repoTrends {
+			o.TrendSummary[string(rt.Direction)]++
+		}
+	}
 
-	// History: one point per succeeded scan, with today's exclusion settings.
+	// History: one point per succeeded scan, with today's exclusion settings (owned repos only).
 	rows, err := s.db.Query(ctx, `
 		SELECT sc.id, sc.started_at, s.repo_id, s.name, s.is_fork, s.is_archived, s.stars, s.forks, s.health_score
-		FROM scans sc JOIN repo_snapshots s ON s.scan_id = sc.id
-		WHERE sc.user_id = $1 AND sc.status = 'succeeded' ORDER BY sc.id`, userID)
+		FROM scans sc
+		JOIN repo_snapshots s ON s.scan_id = sc.id
+		JOIN repos r ON r.id = s.repo_id
+		WHERE sc.user_id = $1 AND sc.status = 'succeeded' AND r.source = 'owned' ORDER BY sc.id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +431,7 @@ func (s *Service) Analytics(ctx context.Context, userID int64) (*Analytics, erro
 	if err != nil {
 		loc = time.UTC
 	}
-	repos, err := s.repoRows(ctx, latest.ID, st)
+	repos, err := s.repoRowsForSource(ctx, latest.ID, st, "owned")
 	if err != nil {
 		return nil, err
 	}
@@ -572,6 +630,7 @@ type RepoDetail struct {
 	Runs      []RunInfo          `json:"failedRuns"`
 	History   []RepoHistoryPoint `json:"history"`
 	Weekly    []WeekPoint        `json:"weekly"`
+	Trend     *RepoTrendDetail   `json:"trend,omitempty"`
 }
 
 func (s *Service) Repo(ctx context.Context, userID, repoID int64) (*RepoDetail, error) {
@@ -671,6 +730,9 @@ func (s *Service) Repo(ctx context.Context, userID, repoID int64) (*RepoDetail, 
 		return nil, err
 	}
 	d.Weekly = Weekly(all, mine, now, 52)
+	if td, err := s.TrendForRepo(ctx, userID, repoID); err == nil {
+		d.Trend = td
+	}
 	return d, nil
 }
 
@@ -715,6 +777,7 @@ type Digest struct {
 	NewStars      []ActorEvent `json:"newStars"`
 	NewForks      []ActorEvent `json:"newForks"`
 	Deltas        []CountDelta `json:"deltas"`
+	WhatToFixNext []ActionItem `json:"whatToFixNext"`
 }
 
 // Digest summarises what changed since the previous scan (or the last 7 days
@@ -728,7 +791,7 @@ func (s *Service) Digest(ctx context.Context, userID int64, login string) (*Dige
 	if err != nil {
 		return nil, err
 	}
-	repos, err := s.repoRows(ctx, latest.ID, st)
+	repos, err := s.repoRowsForSource(ctx, latest.ID, st, "owned")
 	if err != nil {
 		return nil, err
 	}
@@ -800,6 +863,11 @@ func (s *Service) Digest(ctx context.Context, userID int64, login string) (*Dige
 		}); err != nil {
 			return nil, err
 		}
+	}
+	if top5, err := s.ActionItems(ctx, userID, 5); err == nil {
+		d.WhatToFixNext = top5
+	} else {
+		d.WhatToFixNext = []ActionItem{}
 	}
 	return d, nil
 }

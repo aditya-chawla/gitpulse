@@ -21,10 +21,12 @@ import (
 
 	"github.com/harshit3011/gitpulse/backend/internal/github"
 	"github.com/harshit3011/gitpulse/backend/internal/health"
+	"github.com/harshit3011/gitpulse/backend/internal/insights"
 	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/releases"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
 	"github.com/harshit3011/gitpulse/backend/internal/store"
+	"github.com/harshit3011/gitpulse/backend/internal/trends"
 )
 
 // Backend is the data the tools read. Live adapts the real services; tests
@@ -38,6 +40,12 @@ type Backend interface {
 	PRReviews(ctx context.Context, u *store.User, limit int) ([]prreview.ReviewRow, error)
 	ReleasePreview(ctx context.Context, u *store.User, repoID int64) (*releases.Preview, error)
 	CreateRelease(ctx context.Context, u *store.User, repoID int64, in releases.CreateInput) (*github.Release, error)
+	TrendsOverview(ctx context.Context, u *store.User) ([]stats.RepoTrend, error)
+	TrendForRepo(ctx context.Context, u *store.User, repoID int64) (*stats.RepoTrendDetail, error)
+	ActionItems(ctx context.Context, u *store.User, limit int) ([]stats.ActionItem, error)
+	DismissActionItem(ctx context.Context, u *store.User, id int64) error
+	Insights(ctx context.Context, u *store.User, source string) ([]insights.RepoInsights, error)
+	RepoInsights(ctx context.Context, u *store.User, repoID int64) (*insights.RepoInsights, error)
 }
 
 const Version = "1.0.0"
@@ -46,8 +54,8 @@ const Version = "1.0.0"
 // when allowWrites is true, so clients never even see it otherwise.
 func NewServer(b Backend, allowWrites bool, log *slog.Logger) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "gitpulse", Title: "gitpulse", Version: Version}, &mcp.ServerOptions{
-		Instructions: "gitpulse is a dashboard of the user's own GitHub repositories, built from a daily scan. " +
-			"Use these tools to answer questions about repo health, languages, commit activity, what needs attention, and pull request reviews. " +
+		Instructions: "gitpulse is a repository intelligence and maintenance dashboard for the user's own and watched public GitHub repositories, built from a daily scan. " +
+			"Use these tools to answer questions about repo health, 7d/30d trends (improving/steady/slipping), prioritized maintenance actions, languages, commit activity, and pull request reviews. " +
 			"Data is as of the latest scan (see scannedAt in results).",
 	})
 	t := &tools{b: b, log: log}
@@ -71,12 +79,28 @@ func NewServer(b Backend, allowWrites bool, log *slog.Logger) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: "get_pr_reviews", Annotations: ro,
 		Description: "Recent gitpulse PR assistant reviews: notable/risky changes, suggested labels and (when AI is on) summaries. Optionally filter by repository."},
 		t.prReviews)
+	mcp.AddTool(s, &mcp.Tool{Name: "get_trends", Annotations: ro,
+		Description: "7-day and 30-day trend direction (improving, steady, slipping) and metric deltas across all tracked repositories, or full trend history and decay alerts for one repository."},
+		t.trends)
+	mcp.AddTool(s, &mcp.Tool{Name: "get_action_items", Annotations: ro,
+		Description: "Prioritized, severity-weighted 'What to Fix Next' maintenance action queue across owned and watched repositories."},
+		t.actionItems)
+	mcp.AddTool(s, &mcp.Tool{Name: "get_repo_insights", Annotations: ro,
+		Description: "Postgres-computed data science insights: Z-score anomalies, PR age median/P90 percentiles, 30-day health trajectory linear regression slope, contributor diversity, and contributor readiness. Filter by repo or source ('owned' or 'watched')."},
+		t.repoInsights)
+	mcp.AddTool(s, &mcp.Tool{Name: "compare_watched_repos", Annotations: ro,
+		Description: "Compare all watched open-source repositories ranked by contributor readiness, showing health trajectory, PR responsiveness, diversity score, and statistical anomalies."},
+		t.compareWatched)
 	if allowWrites {
 		mcp.AddTool(s, &mcp.Tool{Name: "draft_release_notes",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: new(false), IdempotentHint: false, OpenWorldHint: new(true)},
 			Description: "Create a DRAFT GitHub release for a repository with notes for everything merged since the last release, grouped into features, fixes, internal and dependencies. " +
 				"It never publishes. The repository's 'Draft releases' switch must be on in gitpulse Settings. Omit version to use the suggested semver version."},
 			t.draftRelease)
+		mcp.AddTool(s, &mcp.Tool{Name: "dismiss_action",
+			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: new(false), IdempotentHint: true, OpenWorldHint: new(false)},
+			Description: "Dismiss a prioritized maintenance action item by ID so it stays hidden across future scans."},
+			t.dismissAction)
 	}
 	return s
 }
@@ -155,12 +179,14 @@ type AttentionIn struct {
 }
 
 type attentionRepo struct {
-	Repo     string     `json:"repo"`
-	Score    int        `json:"score"`
-	Status   string     `json:"status"`
-	PushedAt *time.Time `json:"pushedAt,omitempty"`
-	Missing  []string   `json:"missing"`
-	URL      string     `json:"url"`
+	Repo      string           `json:"repo"`
+	Score     int              `json:"score"`
+	Status    string           `json:"status"`
+	Direction trends.Direction `json:"direction,omitempty"`
+	PushedAt  *time.Time       `json:"pushedAt,omitempty"`
+	Missing   []string         `json:"missing"`
+	Alerts    []string         `json:"alerts,omitempty"`
+	URL       string           `json:"url"`
 }
 
 func (t *tools) reposNeedingAttention(ctx context.Context, _ *mcp.CallToolRequest, in AttentionIn) (*mcp.CallToolResult, any, error) {
@@ -172,14 +198,20 @@ func (t *tools) reposNeedingAttention(ctx context.Context, _ *mcp.CallToolReques
 	if err != nil {
 		return nil, nil, friendly(err)
 	}
+	alertsByRepo := map[int64][]string{}
+	if items, err := t.b.ActionItems(ctx, u, 50); err == nil {
+		for _, it := range items {
+			alertsByRepo[it.RepoID] = append(alertsByRepo[it.RepoID], it.Title)
+		}
+	}
 	limit, maxScore := clamp(in.Limit, 10, 1, 50), clamp(in.MaxScore, 70, 1, 101)
 	var out []attentionRepo
 	for _, r := range rs.Repos {
-		if (!in.IncludeArchived && (r.IsArchived || r.IsFork)) || r.HealthScore >= maxScore {
+		if (!in.IncludeArchived && (r.IsArchived || r.IsFork)) || (r.HealthScore >= maxScore && len(alertsByRepo[r.ID]) == 0) {
 			continue
 		}
-		a := attentionRepo{Repo: r.FullName, Score: r.HealthScore, Status: r.Status, PushedAt: r.PushedAt,
-			URL: "https://github.com/" + r.FullName, Missing: []string{}}
+		a := attentionRepo{Repo: r.FullName, Score: r.HealthScore, Status: r.Status, Direction: r.Direction, PushedAt: r.PushedAt,
+			URL: "https://github.com/" + r.FullName, Missing: []string{}, Alerts: alertsByRepo[r.ID]}
 		for _, c := range checksOf(r) {
 			if c.Points < c.Max {
 				a.Missing = append(a.Missing, fmt.Sprintf("%s (%d/%d): %s", c.Label, c.Points, c.Max, c.Detail))
@@ -220,6 +252,9 @@ func (t *tools) repoHealth(ctx context.Context, _ *mcp.CallToolRequest, in RepoI
 	if err != nil {
 		return nil, nil, err
 	}
+	if r.Source == "watched" {
+		return nil, nil, errors.New("watched repositories are read-only; draft releases cannot be created")
+	}
 	d, err := t.b.Repo(ctx, u, r.ID)
 	if err != nil {
 		return nil, nil, friendly(err)
@@ -246,6 +281,7 @@ func (t *tools) repoHealth(ctx context.Context, _ *mcp.CallToolRequest, in RepoI
 		"scannedAt": d.Scan.FinishedAt, "repo": d.Repo.FullName, "url": "https://github.com/" + d.Repo.FullName,
 		"description": d.Repo.Description, "visibility": d.Repo.Visibility, "archived": d.Repo.IsArchived,
 		"score": d.Repo.HealthScore, "status": d.Repo.Status, "checks": checksOf(d.Repo),
+		"trend":    d.Trend,
 		"pushedAt": d.Repo.PushedAt, "stars": d.Repo.Stars, "forks": d.Repo.Forks,
 		"openPRsAndIssues": items, "staleBranches": nonNil(stale), "failedRuns": nonNilRuns(d.Runs),
 		"primaryLanguage": d.Repo.PrimaryLanguage,
@@ -411,6 +447,9 @@ func (t *tools) draftRelease(ctx context.Context, _ *mcp.CallToolRequest, in Dra
 	if err != nil {
 		return nil, nil, err
 	}
+	if r.Source == "watched" {
+		return nil, nil, errors.New("watched repositories are read-only; draft releases cannot be created")
+	}
 	p, err := t.b.ReleasePreview(ctx, u, r.ID)
 	if err != nil {
 		return nil, nil, friendly(err)
@@ -432,6 +471,125 @@ func (t *tools) draftRelease(ctx context.Context, _ *mcp.CallToolRequest, in Dra
 	t.log.Info("mcp draft release", "repo", r.FullName, "tag", tag)
 	return text(map[string]any{"draft": true, "tag": tag, "url": rel.HTMLURL, "mergedPRs": p.Count,
 		"baseTag": p.BaseTag, "notes": p.Markdown, "note": "Created as a draft; review and publish it on GitHub."})
+}
+
+// --- get_trends ---
+
+type TrendsIn struct {
+	Repo string `json:"repo,omitempty" jsonschema:"optional repository name or owner/name; omit to list all tracked repositories"`
+}
+
+func (t *tools) trends(ctx context.Context, _ *mcp.CallToolRequest, in TrendsIn) (*mcp.CallToolResult, any, error) {
+	u, err := t.user(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(in.Repo) != "" {
+		r, err := t.findRepo(ctx, u, in.Repo)
+		if err != nil {
+			return nil, nil, err
+		}
+		d, err := t.b.TrendForRepo(ctx, u, r.ID)
+		if err != nil {
+			return nil, nil, friendly(err)
+		}
+		return text(d)
+	}
+	repos, err := t.b.TrendsOverview(ctx, u)
+	if err != nil {
+		return nil, nil, friendly(err)
+	}
+	return text(map[string]any{"repos": repos})
+}
+
+// --- get_action_items ---
+
+type ActionItemsIn struct {
+	Limit int `json:"limit,omitempty" jsonschema:"maximum action items to return (default 10, max 50)"`
+}
+
+func (t *tools) actionItems(ctx context.Context, _ *mcp.CallToolRequest, in ActionItemsIn) (*mcp.CallToolResult, any, error) {
+	u, err := t.user(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	items, err := t.b.ActionItems(ctx, u, clamp(in.Limit, 10, 1, 50))
+	if err != nil {
+		return nil, nil, friendly(err)
+	}
+	return text(map[string]any{"items": items})
+}
+
+// --- get_repo_insights ---
+
+type InsightsIn struct {
+	Repo   string `json:"repo,omitempty" jsonschema:"optional repository name (owner/name or short name)"`
+	Source string `json:"source,omitempty" jsonschema:"optional source filter: 'owned' or 'watched'"`
+}
+
+func (t *tools) repoInsights(ctx context.Context, _ *mcp.CallToolRequest, in InsightsIn) (*mcp.CallToolResult, any, error) {
+	u, err := t.user(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(in.Repo) != "" {
+		r, err := t.findRepo(ctx, u, in.Repo)
+		if err != nil {
+			return nil, nil, err
+		}
+		res, err := t.b.RepoInsights(ctx, u, r.ID)
+		if err != nil {
+			return nil, nil, friendly(err)
+		}
+		return text(res)
+	}
+	items, err := t.b.Insights(ctx, u, in.Source)
+	if err != nil {
+		return nil, nil, friendly(err)
+	}
+	return text(map[string]any{"repos": items})
+}
+
+// --- compare_watched_repos ---
+
+type CompareWatchedIn struct{}
+
+func (t *tools) compareWatched(ctx context.Context, _ *mcp.CallToolRequest, _ CompareWatchedIn) (*mcp.CallToolResult, any, error) {
+	u, err := t.user(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	items, err := t.b.Insights(ctx, u, "watched")
+	if err != nil {
+		return nil, nil, friendly(err)
+	}
+	slices.SortStableFunc(items, func(a, b insights.RepoInsights) int {
+		if a.ContributorReadiness != b.ContributorReadiness {
+			return b.ContributorReadiness - a.ContributorReadiness
+		}
+		return b.HealthScore - a.HealthScore
+	})
+	return text(map[string]any{"watchedRepos": items})
+}
+
+// --- dismiss_action (write; registered only with MCP_ALLOW_WRITES) ---
+
+type DismissActionIn struct {
+	ID int64 `json:"id" jsonschema:"action item ID to dismiss"`
+}
+
+func (t *tools) dismissAction(ctx context.Context, _ *mcp.CallToolRequest, in DismissActionIn) (*mcp.CallToolResult, any, error) {
+	u, err := t.user(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := t.b.DismissActionItem(ctx, u, in.ID); err != nil {
+		if errors.Is(err, stats.ErrNotFound) {
+			return nil, nil, errors.New("action item not found")
+		}
+		return nil, nil, err
+	}
+	return text(map[string]any{"ok": true, "id": in.ID})
 }
 
 // --- HTTP ---

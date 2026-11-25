@@ -84,6 +84,9 @@ func (s *Service) Preview(ctx context.Context, u *store.User, repoID int64) (*Pr
 	if err != nil {
 		return nil, err
 	}
+	if rs.Source == "watched" {
+		return nil, fmt.Errorf("%w: watched repositories are read-only", ErrNotAllowed)
+	}
 	gh, err := s.access.Read(ctx, u)
 	if err != nil {
 		return nil, err

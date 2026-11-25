@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/harshit3011/gitpulse/backend/internal/github"
+	"github.com/harshit3011/gitpulse/backend/internal/insights"
 	"github.com/harshit3011/gitpulse/backend/internal/prreview"
 	"github.com/harshit3011/gitpulse/backend/internal/releases"
 	"github.com/harshit3011/gitpulse/backend/internal/stats"
@@ -58,4 +59,28 @@ func (l Live) ReleasePreview(ctx context.Context, u *store.User, id int64) (*rel
 
 func (l Live) CreateRelease(ctx context.Context, u *store.User, id int64, in releases.CreateInput) (*github.Release, error) {
 	return l.Releases.Create(ctx, u, id, in, "mcp")
+}
+
+func (l Live) TrendsOverview(ctx context.Context, u *store.User) ([]stats.RepoTrend, error) {
+	return l.Stats.TrendsOverview(ctx, u.ID)
+}
+
+func (l Live) TrendForRepo(ctx context.Context, u *store.User, repoID int64) (*stats.RepoTrendDetail, error) {
+	return l.Stats.TrendForRepo(ctx, u.ID, repoID)
+}
+
+func (l Live) ActionItems(ctx context.Context, u *store.User, limit int) ([]stats.ActionItem, error) {
+	return l.Stats.ActionItems(ctx, u.ID, limit)
+}
+
+func (l Live) DismissActionItem(ctx context.Context, u *store.User, id int64) error {
+	return l.Stats.DismissActionItem(ctx, u.ID, id)
+}
+
+func (l Live) Insights(ctx context.Context, u *store.User, source string) ([]insights.RepoInsights, error) {
+	return l.Stats.Insights(ctx, u.ID, source)
+}
+
+func (l Live) RepoInsights(ctx context.Context, u *store.User, repoID int64) (*insights.RepoInsights, error) {
+	return l.Stats.RepoInsights(ctx, u.ID, repoID)
 }

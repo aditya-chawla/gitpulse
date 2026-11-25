@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { isNoData, type Analytics, type NoData, type Overview, type TopRepo } from '../api'
 import { foldLanguages, languageColors, OTHER, OTHER_COLOR, SLOTS } from '../colors'
 import { BarList, Heatmap, HistoryChart, LanguageTable, LanguageTrendChart, SegmentedBar, WeeklyChart } from '../components/charts'
+import ActionQueue from '../components/ActionQueue'
 import { Card, ChartCard, ErrorBox, Legend, NoScanYet, Segmented, Spinner, StatTile, Table } from '../components/ui'
 import { useApi } from '../data'
 import { hourLabel, num, pct, shortDate, WEEKDAYS } from '../format'
@@ -33,6 +34,8 @@ function Dashboard({ ov, an }: { ov: Overview; an: Analytics }) {
           {ov.totalRepos > ov.includedRepos && <> · forks, archived and excluded repos are left out (<Link to="/settings" className="text-accent hover:underline">settings</Link>)</>}
         </p>
       </div>
+
+      <ActionQueue limit={5} />
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         <StatTile label="Repositories" value={num(ov.includedRepos)} sub={`${ov.privateRepos} private · ${ov.forkRepos} forks`} />

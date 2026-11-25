@@ -29,6 +29,18 @@ export default function DigestPage() {
         <Count label="New forks" n={d.newForks.length} />
       </div>
 
+      {!!d.whatToFixNext?.length && (
+        <Section title="What to fix next" hint="Top severity-weighted maintenance alerts">
+          <ul className="divide-y divide-line text-[13px]">
+            {d.whatToFixNext.map((a) => (
+              <Row key={a.id} href={a.url || `https://github.com/${a.repoName}`}
+                title={<><span className="text-muted">{a.repoName}</span> · {a.title}</>}
+                meta={`Severity ${a.severity}/5`} />
+            ))}
+          </ul>
+        </Section>
+      )}
+
       <Section title="Pull requests waiting on you" hint="Open PRs on your repos by others, or where your review was requested">
         {d.waitingOnMe.length ? (
           <ul className="divide-y divide-line text-[13px]">
